@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kyotei-yosou"
+version = "0.1.0"
+description = "全競艇場対応の競艇予想ロジック・スクリプト"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.34",
+    "beautifulsoup4>=4.15",
+    "lxml>=6.1",
+]
+
+[project.optional-dependencies]
+web = [
+    "streamlit>=1.60",
+    "altair>=6.2",
+    "pandas>=3.0",
+]
+
+[project.scripts]
+kyotei = "kyotei.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
