@@ -3,6 +3,7 @@
 使い方:
     kyotei predict --venue 桐生 --date 20260802 --race 1
     kyotei predict --venue 01 --date 20260802 --race 1 --no-cache
+    kyotei predict --venue 桐生 --date 20260802 --race 5 --budget 1000
     kyotei backtest --venue 桐生 --date 20260731 --race 1
     kyotei backtest-day --date 20260731 --venues 桐生,唐津
     kyotei backtest-day --date 20260731 --venues all
@@ -18,17 +19,34 @@ import argparse
 import sys
 
 from kyotei.backtest import parse_race_range, run_day_backtest, run_single_backtest
-from kyotei.constants import VENUES, racer_profile_url, venue_code
-from kyotei.models.combos import exacta_candidates, trifecta_candidates
-from kyotei.models.entities import BeforeInfo, RacePrediction
+from kyotei.constants import VENUES, racer_profile_url, raceresult_url, venue_code
+from kyotei.dayview import fetch_day_results
+from kyotei.models.allocation import allocate_budget
+from kyotei.models.combos import exacta_candidates
+from kyotei.models.entities import BeforeInfo, RacePrediction, TrifectaOdds
+from kyotei.models.genres import (
+    GENRE_CHUANA,
+    GENRE_HONMEI,
+    GENRE_OOANA,
+    LONGSHOT_ODDS_MIN,
+    MID_ODDS_MIN,
+    categorize_trifecta,
+)
 from kyotei.models.predictor import predict_race
 from kyotei.scraper.beforeinfo import parse_beforeinfo_html
 from kyotei.scraper.client import BoatraceClient
+from kyotei.scraper.odds import parse_odds3t_html
 from kyotei.scraper.racelist import parse_racelist_html
 from kyotei.storage import BacktestOutcome, BacktestStore
 
 
-def _format_prediction(prediction: RacePrediction, before_info: BeforeInfo | None) -> str:
+def _format_prediction(
+    client: BoatraceClient,
+    prediction: RacePrediction,
+    before_info: BeforeInfo | None,
+    odds_list: list[TrifectaOdds] | None,
+    budget: int | None,
+) -> str:
     race = prediction.race
     lines = [
         f"{race.venue_name}（{race.venue_code}） {race.date} {race.race_number}R 予想",
@@ -59,13 +77,45 @@ def _format_prediction(prediction: RacePrediction, before_info: BeforeInfo | Non
         lines.append(f"{e.lane}  {e.name}: {racer_profile_url(e.racer_id)}")
 
     lines.append("")
-    lines.append("[買い目候補（3連単 上位6点、推定勝率からのHarville近似）]")
-    for t in trifecta_candidates(prediction.predictions, top_n=6):
-        lines.append(f"{t.label:<10}{t.probability * 100:>6.1f}%")
+    lines.append("[買い目候補（3連単）]")
+    if odds_list is None:
+        lines.append("（オッズ未取得のため「本命」のみ表示。中穴・大穴の判定にはオッズが必要）")
+    genres = categorize_trifecta(prediction.predictions, odds_list, top_n=5)
+    genre_notes = {
+        GENRE_HONMEI: "的中重視・推定確率が高い順",
+        GENRE_CHUANA: f"そこそこ的中も狙えるオッズ帯（目安{MID_ODDS_MIN:.0f}〜{LONGSHOT_ODDS_MIN:.0f}倍）",
+        GENRE_OOANA: "高配当狙い。期待値(推定確率×オッズ)が高い順",
+    }
+    budget_target_genre: list = []
+    for genre in (GENRE_HONMEI, GENRE_CHUANA, GENRE_OOANA):
+        candidates = genres[genre]
+        if not candidates:
+            continue
+        lines.append(f"● {genre}（{genre_notes[genre]}）")
+        for c in candidates:
+            odds_text = f" オッズ{c.odds:.1f}倍" if c.odds is not None else ""
+            ev_text = f" 期待値{c.expected_value:.2f}" if c.expected_value is not None else ""
+            lines.append(f"  {c.label:<10}確率{c.probability * 100:>5.1f}%{odds_text}{ev_text}")
+        if genre == GENRE_HONMEI:
+            budget_target_genre = candidates
+
     lines.append("")
     lines.append("[買い目候補（2連単 上位3点）]")
     for t in exacta_candidates(prediction.predictions, top_n=3):
         lines.append(f"{t.label:<10}{t.probability * 100:>6.1f}%")
+
+    if budget is not None and budget_target_genre:
+        lines.append("")
+        lines.append(f"[予算配分（本命 {len(budget_target_genre)}点、予算{budget}円）]")
+        allocations = allocate_budget(budget_target_genre, budget)
+        if not allocations:
+            lines.append(f"（予算{budget}円では100円単位の配分ができません）")
+        else:
+            total = 0
+            for a in allocations:
+                lines.append(f"  {a.candidate.label:<10}{a.amount:>6}円")
+                total += a.amount
+            lines.append(f"  合計: {total}円（予算との差額 {budget - total}円は未配分）")
 
     if before_info is not None:
         lines.append("")
@@ -88,6 +138,18 @@ def _format_prediction(prediction: RacePrediction, before_info: BeforeInfo | Non
         lines.append("")
         lines.append("（直前情報は未取得または未公開のため、出走表データのみで予想しています）")
 
+    if race.race_number > 1:
+        lines.append("")
+        lines.append(f"[本日ここまでの結果（{race.venue_name}）]")
+        earlier = fetch_day_results(client, race.venue_code, race.date, list(range(1, race.race_number)))
+        if not earlier:
+            lines.append("（まだ確定した結果はありません）")
+        for r in earlier:
+            top3 = sorted((e for e in r.entries if 1 <= e.rank <= 3), key=lambda e: e.rank)
+            top3_text = " ".join(f"{e.rank}着{e.lane}号艇" for e in top3)
+            lines.append(f"  {r.race_number}R: {top3_text}")
+            lines.append(f"    詳細: {raceresult_url(race.venue_code, race.date, r.race_number)}")
+
     return "\n".join(lines)
 
 
@@ -101,14 +163,26 @@ def _fetch_before_info(
         return None
 
 
+def _fetch_odds(
+    client: BoatraceClient, code: str, date: str, race_number: int
+) -> list[TrifectaOdds] | None:
+    try:
+        html = client.get_odds3t_html(code, date, race_number)
+        odds_list = parse_odds3t_html(html, code, date, race_number)
+        return odds_list or None
+    except Exception:
+        return None
+
+
 def cmd_predict(args: argparse.Namespace) -> int:
     code = venue_code(args.venue)
     client = BoatraceClient(use_cache=not args.no_cache)
     html = client.get_racelist_html(code, args.date, args.race)
     race = parse_racelist_html(html, code, args.date, args.race)
     before_info = _fetch_before_info(client, code, args.date, args.race)
+    odds_list = _fetch_odds(client, code, args.date, args.race)
     prediction = predict_race(race, before_info=before_info)
-    print(_format_prediction(prediction, before_info))
+    print(_format_prediction(client, prediction, before_info, odds_list, args.budget))
     return 0
 
 
@@ -211,6 +285,9 @@ def build_parser() -> argparse.ArgumentParser:
     predict_parser.add_argument("--venue", required=True, help="競艇場名 または 場コード（例: 桐生, 01）")
     predict_parser.add_argument("--date", required=True, help="開催日 YYYYMMDD（例: 20260802）")
     predict_parser.add_argument("--race", required=True, type=int, help="レース番号 1-12")
+    predict_parser.add_argument(
+        "--budget", type=int, default=None, help="予算（円）。指定すると本命の買い目に配分する"
+    )
     predict_parser.add_argument(
         "--no-cache", action="store_true", help="ローカルキャッシュを使わず毎回取得する"
     )

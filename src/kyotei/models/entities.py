@@ -94,6 +94,14 @@ class BeforeInfo:
 
 
 @dataclass
+class TrifectaOdds:
+    """3連単1組番ぶんのオッズ（レース発売中の払戻倍率、随時変動する）。"""
+
+    lanes: tuple[int, int, int]  # (1着, 2着, 3着)
+    odds: float  # 倍率。100円が odds*100 円になる目安
+
+
+@dataclass
 class RaceResultEntry:
     """レース結果1着分のデータ（学習データ収集・答え合わせ用）。"""
 

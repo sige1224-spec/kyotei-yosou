@@ -15,11 +15,22 @@ import pandas as pd
 import streamlit as st
 
 from kyotei.backtest import parse_race_range, run_day_backtest
-from kyotei.constants import VENUES, racer_profile_url, venue_code
-from kyotei.models.combos import exacta_candidates, trifecta_candidates
+from kyotei.constants import VENUES, racer_profile_url, raceresult_url, venue_code
+from kyotei.dayview import fetch_day_results
+from kyotei.models.allocation import allocate_budget
+from kyotei.models.combos import exacta_candidates
+from kyotei.models.genres import (
+    GENRE_CHUANA,
+    GENRE_HONMEI,
+    GENRE_OOANA,
+    LONGSHOT_ODDS_MIN,
+    MID_ODDS_MIN,
+    categorize_trifecta,
+)
 from kyotei.models.predictor import predict_race
 from kyotei.scraper.beforeinfo import parse_beforeinfo_html
 from kyotei.scraper.client import BoatraceClient
+from kyotei.scraper.odds import parse_odds3t_html
 from kyotei.scraper.racelist import parse_racelist_html
 from kyotei.storage import BacktestStore
 
@@ -50,8 +61,21 @@ def _fetch_prediction(code: str, date_str: str, race_number: int, use_cache: boo
         before_info = parse_beforeinfo_html(before_html, code, date_str, race_number)
     except Exception:
         before_info = None
+    try:
+        odds_html = client.get_odds3t_html(code, date_str, race_number)
+        odds_list = parse_odds3t_html(odds_html, code, date_str, race_number) or None
+    except Exception:
+        odds_list = None
     prediction = predict_race(race, before_info=before_info)
-    return before_info, prediction
+    return before_info, odds_list, prediction
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_earlier_results(code: str, date_str: str, race_number: int, use_cache: bool):
+    if race_number <= 1:
+        return []
+    client = BoatraceClient(use_cache=use_cache)
+    return fetch_day_results(client, code, date_str, list(range(1, race_number)))
 
 
 def _render_predict_page() -> None:
@@ -72,8 +96,10 @@ def _render_predict_page() -> None:
     date_str = race_date.strftime("%Y%m%d")
 
     try:
-        with st.spinner("出走表・直前情報を取得中..."):
-            before_info, prediction = _fetch_prediction(code, date_str, race_number, use_cache)
+        with st.spinner("出走表・直前情報・オッズを取得中..."):
+            before_info, odds_list, prediction = _fetch_prediction(
+                code, date_str, race_number, use_cache
+            )
     except Exception as exc:
         st.error(f"取得に失敗しました: {exc}")
         return
@@ -153,34 +179,74 @@ def _render_predict_page() -> None:
         },
     )
 
-    st.subheader("買い目候補")
+    st.subheader("買い目候補（3連単）")
     st.caption(
-        "各艇の推定勝率からHarvilleの公式で近似した組み合わせ確率。"
-        "実際のレース展開の相関までは考慮していない参考値。"
+        "各艇の推定勝率からHarvilleの公式で近似した組み合わせ確率と、"
+        "boatrace.jpのオッズを使い「本命・中穴・大穴」に分類。"
+        "オッズは常に変動し、大穴は特にモデルの誤差が乗りやすいため参考程度に。"
     )
-    tab_trifecta, tab_exacta = st.tabs(["3連単", "2連単"])
+    if odds_list is None:
+        st.info("オッズ未取得のため「本命」のみ表示しています（発売前・未公開の可能性）。")
 
-    with tab_trifecta:
-        trifecta_df = pd.DataFrame(
-            [
-                {"組番": t.label, "推定確率": t.probability * 100}
-                for t in trifecta_candidates(ranked, top_n=8)
-            ]
-        )
-        combo_bar = (
-            alt.Chart(trifecta_df)
-            .mark_bar(size=20, cornerRadiusTopLeft=4, cornerRadiusTopRight=4, color=CATEGORICAL_PALETTE[0])
-            .encode(
-                x=alt.X("組番:N", sort=None, title="組番（1着-2着-3着）"),
-                y=alt.Y("推定確率:Q", title="推定確率(%)"),
-                tooltip=["組番", alt.Tooltip("推定確率:Q", format=".2f")],
+    genres = categorize_trifecta(ranked, odds_list, top_n=8)
+    genre_captions = {
+        GENRE_HONMEI: "的中重視。推定確率が高い順。",
+        GENRE_CHUANA: f"オッズ目安 {MID_ODDS_MIN:.0f}〜{LONGSHOT_ODDS_MIN:.0f}倍のうち推定確率が高い順。",
+        GENRE_OOANA: "オッズ目安 " f"{LONGSHOT_ODDS_MIN:.0f}倍以上のうち期待値(推定確率×オッズ)が高い順。",
+    }
+    tab_honmei, tab_chuana, tab_ooana, tab_exacta = st.tabs(
+        [GENRE_HONMEI, GENRE_CHUANA, GENRE_OOANA, "2連単"]
+    )
+
+    for genre, tab in [(GENRE_HONMEI, tab_honmei), (GENRE_CHUANA, tab_chuana), (GENRE_OOANA, tab_ooana)]:
+        with tab:
+            st.caption(genre_captions[genre])
+            candidates = genres[genre]
+            if not candidates:
+                st.info("該当する候補がありません（オッズ未取得、または条件に合う組番なし）。")
+                continue
+            genre_df = pd.DataFrame(
+                [
+                    {
+                        "組番": c.label,
+                        "推定確率": c.probability * 100,
+                        "オッズ": c.odds,
+                        "期待値": c.expected_value,
+                    }
+                    for c in candidates
+                ]
             )
-        )
-        combo_labels = combo_bar.mark_text(dy=-8, color=INK_SECONDARY).encode(
-            text=alt.Text("推定確率:Q", format=".1f")
-        )
-        st.altair_chart((combo_bar + combo_labels).properties(height=280), width="stretch")
-        st.dataframe(trifecta_df, width="stretch", hide_index=True)
+            combo_bar = (
+                alt.Chart(genre_df)
+                .mark_bar(
+                    size=20, cornerRadiusTopLeft=4, cornerRadiusTopRight=4, color=CATEGORICAL_PALETTE[0]
+                )
+                .encode(
+                    x=alt.X("組番:N", sort=None, title="組番（1着-2着-3着）"),
+                    y=alt.Y("推定確率:Q", title="推定確率(%)"),
+                    tooltip=[
+                        "組番",
+                        alt.Tooltip("推定確率:Q", format=".2f"),
+                        alt.Tooltip("オッズ:Q", format=".1f"),
+                        alt.Tooltip("期待値:Q", format=".2f"),
+                    ],
+                )
+            )
+            combo_labels = combo_bar.mark_text(dy=-8, color=INK_SECONDARY).encode(
+                text=alt.Text("推定確率:Q", format=".1f")
+            )
+            st.altair_chart((combo_bar + combo_labels).properties(height=260), width="stretch")
+            st.dataframe(
+                genre_df,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "オッズ": st.column_config.NumberColumn("オッズ", format="%.1f倍"),
+                    "期待値": st.column_config.NumberColumn(
+                        "期待値", format="%.2f", help="推定確率×オッズ。1.0超で理論上は買い得の目安"
+                    ),
+                },
+            )
 
     with tab_exacta:
         exacta_df = pd.DataFrame(
@@ -190,6 +256,27 @@ def _render_predict_page() -> None:
             ]
         )
         st.dataframe(exacta_df, width="stretch", hide_index=True)
+
+    st.subheader("予算配分")
+    st.caption("推定確率に比例して100円単位で配分する試算。実際の購入・投票は行わない。")
+    budget_col, genre_col = st.columns([2, 1])
+    budget = budget_col.number_input("予算（円）", min_value=0, step=100, value=0)
+    budget_genre = genre_col.selectbox("配分対象ジャンル", [GENRE_HONMEI, GENRE_CHUANA, GENRE_OOANA])
+    if budget >= 100:
+        target_candidates = genres.get(budget_genre, [])
+        allocations = allocate_budget(target_candidates, int(budget))
+        if not allocations:
+            st.info("配分できる候補がありません（オッズ未取得、または候補数不足）。")
+        else:
+            alloc_df = pd.DataFrame(
+                [
+                    {"組番": a.candidate.label, "配分額": a.amount, "推定確率": a.candidate.probability * 100}
+                    for a in allocations
+                ]
+            )
+            st.dataframe(alloc_df, width="stretch", hide_index=True)
+            total = sum(a.amount for a in allocations)
+            st.caption(f"合計 {total}円（予算との差額 {int(budget) - total}円は未配分）")
 
     if before_info is not None and before_info.exhibitions:
         st.subheader("直前情報")
@@ -220,6 +307,21 @@ def _render_predict_page() -> None:
             "直前情報は未取得または未公開です（レース開始が近づくと公開されます）。"
             "出走表データのみで予想しています。"
         )
+
+    if race_number > 1:
+        st.subheader(f"本日ここまでの結果（{venue_name}）")
+        earlier = _fetch_earlier_results(code, date_str, race_number, use_cache)
+        if not earlier:
+            st.info("まだ確定した結果はありません。")
+        else:
+            for r in earlier:
+                top3 = sorted((e for e in r.entries if 1 <= e.rank <= 3), key=lambda e: e.rank)
+                top3_text = " ／ ".join(f"{e.rank}着 {e.lane}号艇 {e.name}" for e in top3)
+                result_col, link_col = st.columns([4, 1])
+                result_col.markdown(f"**{r.race_number}R**: {top3_text}")
+                link_col.link_button(
+                    "公式サイトで見る", raceresult_url(code, date_str, r.race_number)
+                )
 
 
 def _render_backtest_dashboard() -> None:

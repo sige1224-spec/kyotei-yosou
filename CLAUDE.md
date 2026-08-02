@@ -24,16 +24,20 @@ src/kyotei/
   cli.py               # CLIエントリポイント（`kyotei` コマンド）
   backtest.py          # backtest実行ロジック（CLI・Web共通）
   storage.py           # backtest結果（的中率・回収率）を蓄積するSQLiteストア（data/kyotei.db）
+  dayview.py            # 同一開催日・同一会場の他レース結果をまとめて取得
   models/
-    entities.py        # RaceCard, RacerEntry, BeforeInfo, RaceResult, Payout, RacePrediction 等
+    entities.py        # RaceCard, RacerEntry, BeforeInfo, RaceResult, Payout, TrifectaOdds 等
     predictor.py        # 統計・ルールベースの予想ロジック
     combos.py            # 推定勝率から買い目候補（3連単/2連単/3連複）をHarville近似で算出
+    genres.py             # 買い目候補を本命/中穴/大穴に分類（推定確率×オッズ）
+    allocation.py          # 予算を推定確率に比例して100円単位で配分
   scraper/
     _text.py             # パーサー共通のテキスト正規化ヘルパー
     client.py           # boatrace.jp向けHTTPクライアント（レート制限・キャッシュ付き）
     racelist.py          # 出走表ページのパーサー
     beforeinfo.py         # 直前情報ページ（展示タイム・進入コース・気象情報）のパーサー
     result.py            # レース結果ページのパーサー（着順・払戻金）
+    odds.py               # 3連単オッズページのパーサー
 web/
   app.py               # Streamlitダッシュボード（レース予想 / 検証ダッシュボード）
 scripts/
@@ -85,6 +89,12 @@ python -m pytest                                            # テスト実行
 - 買い目候補（`combos.py`）はHarvilleの公式（1973年、競馬で提案された手法）で推定勝率から
   着順の組み合わせ確率を近似したもの。艇どうしの展開上の相関は捉えられない単純化である旨を
   明記している。
+- ジャンル分け（`genres.py`）は3連単オッズ（`odds.py`、boatrace.jpの odds3t ページ）を
+  使い、本命（確率順）/中穴（オッズ7〜30倍で確率順）/大穴（オッズ30倍以上で期待値順）に
+  分類する。大穴genreは期待値がモデルとオッズの乖離で見かけ上高く出やすく、backtestでの
+  精度検証も未実施（本命の3連単回収率のみ検証済み、上記参照）。過信しないよう明記している。
+- 予算配分（`allocation.py`）は推定確率に比例した100円単位の配分試算であり、実際の購入・
+  投票は一切行わない。
 - 回収率（`storage.py`）は実際の払戻金ページの金額をそのまま使った試算値。「毎レース
   同じ買い方をしていたら」という仮定のシミュレーションであり、購入を推奨するものではない。
 - `predictor.py` の重み（`PredictorWeights`）は2026-08-02、2026-07-28〜07-30の
@@ -100,10 +110,11 @@ python -m pytest                                            # テスト実行
   （`web/app.py` の `CATEGORICAL_PALETTE`）を使用。枠番の色は固定順で割り当てている。
 
 ## 現状・今後
-- 出走表・直前情報・結果（払戻金含む）の取得/パース、統計・ルールベース予想、買い目候補
-  算出、CLI（predict/backtest/backtest-day/stats）、Streamlitダッシュボード（予想画面・
-  検証画面、選手情報・買い目候補・回収率グラフ含む）まで実装済み。全24場での動作確認済み。
-  GitHub連携でStreamlit Community Cloudにデプロイし、iPhone等からアクセス可能な状態。
+- 出走表・直前情報・結果（払戻金含む）・3連単オッズの取得/パース、統計・ルールベース予想、
+  買い目候補算出（本命/中穴/大穴ジャンル分け）、予算配分、同日他レース結果表示、選手プロフィール
+  リンク、CLI（predict/backtest/backtest-day/stats）、Streamlitダッシュボード（予想画面・
+  検証画面）まで実装済み。全24場での動作確認済み。GitHub連携でStreamlit Community Cloudに
+  デプロイし、iPhone等からアクセス可能な状態。
 - `scripts/collect_history.py`（過去日をまとめてbacktest・データ蓄積）と
   `scripts/tune_weights.py`（キャッシュ済みHTMLのみでネットワーク不要の重み検証・
   ランダムサーチ）も実装済み。一度データを蓄積すれば、以降の重み検証はネット

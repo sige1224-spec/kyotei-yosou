@@ -53,6 +53,14 @@ def racer_profile_url(racer_id: int) -> str:
     return f"{BOATRACE_BASE_URL}{RACER_PROFILE_PATH}?toban={racer_id}"
 
 
+def raceresult_url(venue_code: str, date: str, race_number: int) -> str:
+    """BOATRACE公式サイトの結果ページURLを返す。"""
+    return (
+        f"{BOATRACE_BASE_URL}/owpc/pc/race/raceresult"
+        f"?rno={race_number}&jcd={venue_code}&hd={date}"
+    )
+
+
 def venue_code(name_or_code: str) -> str:
     """場名または場コードを受け取り、2桁の場コード文字列を返す。"""
     if name_or_code in VENUES:
