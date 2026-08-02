@@ -8,7 +8,14 @@
 """
 from __future__ import annotations
 
+import sys
 from datetime import date
+from pathlib import Path
+
+# Streamlit Cloud等、`kyotei`パッケージがpipインストールされていない環境でも
+# 確実にimportできるよう、src/を明示的にsys.pathへ追加する（-e .のインストールが
+# 環境によっては反映されないことがあるための保険）。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import altair as alt
 import pandas as pd

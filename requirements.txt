@@ -1,1 +1,6 @@
--e .[web]
+requests>=2.34
+beautifulsoup4>=4.15
+lxml>=6.1
+streamlit>=1.60
+altair>=6.2
+pandas>=3.0
