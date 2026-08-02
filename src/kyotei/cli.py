@@ -7,6 +7,7 @@
     kyotei backtest --venue 桐生 --date 20260731 --race 1
     kyotei backtest-day --date 20260731 --venues 桐生,唐津
     kyotei backtest-day --date 20260731 --venues all
+    kyotei scan --date 20260802 --venues all --races 1-12 --genre 大穴 --top 10
     kyotei stats
     kyotei stats --venue 桐生 --from 20260701 --to 20260731
 
@@ -33,6 +34,7 @@ from kyotei.models.genres import (
     categorize_trifecta,
 )
 from kyotei.models.predictor import predict_race
+from kyotei.models.scan import top_candidates
 from kyotei.scraper.beforeinfo import parse_beforeinfo_html
 from kyotei.scraper.client import BoatraceClient
 from kyotei.scraper.odds import parse_odds3t_html
@@ -256,6 +258,35 @@ def cmd_backtest_day(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_scan(args: argparse.Namespace) -> int:
+    if args.venues.strip().lower() == "all":
+        codes = list(VENUES.keys())
+    else:
+        codes = [venue_code(v.strip()) for v in args.venues.split(",") if v.strip()]
+
+    races = parse_race_range(args.races)
+    client = BoatraceClient(use_cache=not args.no_cache)
+
+    print(f"[{args.genre}スキャン] {args.date} 対象{len(codes)}場×{len(races)}レース")
+    print("※ 統計的な参考情報であり、的中・回収を保証するものではありません。")
+    print()
+    results = top_candidates(
+        client, codes, args.date, races, genre=args.genre, top_n=args.top
+    )
+    if not results:
+        print("該当する候補が見つかりませんでした（オッズ未発表のレースが多い可能性があります）。")
+        return 0
+    for r in results:
+        c = r.candidate
+        odds_text = f" オッズ{c.odds:.1f}倍" if c.odds is not None else ""
+        ev_text = f" 期待値{c.expected_value:.2f}" if c.expected_value is not None else ""
+        print(
+            f"{r.venue_name} {r.race_number}R  {c.label:<10}確率{c.probability * 100:>5.1f}%"
+            f"{odds_text}{ev_text}"
+        )
+    return 0
+
+
 def cmd_stats(args: argparse.Namespace) -> int:
     store = BacktestStore()
     code = venue_code(args.venue) if args.venue else None
@@ -319,6 +350,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backtest_day_parser.add_argument("--no-cache", action="store_true")
     backtest_day_parser.set_defaults(func=cmd_backtest_day)
+
+    scan_parser = subparsers.add_parser(
+        "scan", help="複数場・複数レースを横断して狙い目の買い目候補を探す"
+    )
+    scan_parser.add_argument("--date", required=True, help="開催日 YYYYMMDD")
+    scan_parser.add_argument(
+        "--venues",
+        required=True,
+        help="場名/場コードのカンマ区切り（例: 桐生,唐津）。全24場対象なら 'all' を指定",
+    )
+    scan_parser.add_argument(
+        "--races", default="1-12", help="レース番号（例: 1-12 や 1,3,5）。デフォルト全レース"
+    )
+    scan_parser.add_argument(
+        "--genre",
+        default=GENRE_OOANA,
+        choices=[GENRE_HONMEI, GENRE_CHUANA, GENRE_OOANA],
+        help="対象ジャンル（デフォルト: 大穴）",
+    )
+    scan_parser.add_argument("--top", type=int, default=10, help="表示件数（デフォルト10件）")
+    scan_parser.add_argument("--no-cache", action="store_true")
+    scan_parser.set_defaults(func=cmd_scan)
 
     stats_parser = subparsers.add_parser("stats", help="蓄積したbacktest結果の的中率を表示する")
     stats_parser.add_argument("--venue", default=None, help="場名/場コードで絞り込み（省略可）")

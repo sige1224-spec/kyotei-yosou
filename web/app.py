@@ -35,6 +35,7 @@ from kyotei.models.genres import (
     categorize_trifecta,
 )
 from kyotei.models.predictor import predict_race
+from kyotei.models.scan import scan_races
 from kyotei.scraper.beforeinfo import parse_beforeinfo_html
 from kyotei.scraper.client import BoatraceClient
 from kyotei.scraper.odds import parse_odds3t_html
@@ -331,6 +332,88 @@ def _render_predict_page() -> None:
                 )
 
 
+def _render_scan_page() -> None:
+    st.title("狙い目スキャン（複数場・複数レース横断）")
+    st.caption(
+        "指定した場・レースをまとめて予想し、ジャンル別の買い目候補を期待値/確率順に一覧表示する。"
+        "オッズ未公開のレースは中穴・大穴の判定ができないため対象外になる。"
+        "※ 統計的な参考情報であり、的中・回収を保証するものではありません。"
+    )
+
+    venues_multi = st.sidebar.multiselect(
+        "対象競艇場（未選択なら全24場）", list(VENUES.values()), key="scan_venues"
+    )
+    scan_date = st.sidebar.date_input("開催日", value=date.today(), key="scan_date")
+    races_text = st.sidebar.text_input("対象レース", value="1-12", key="scan_races_text")
+    genre = st.sidebar.selectbox(
+        "ジャンル", [GENRE_OOANA, GENRE_CHUANA, GENRE_HONMEI], key="scan_genre"
+    )
+    top_n = st.sidebar.slider("表示件数", min_value=5, max_value=30, value=10, key="scan_top_n")
+    use_cache = st.sidebar.checkbox("ローカルキャッシュを使う", value=True, key="scan_use_cache")
+    st.sidebar.caption("対象が多いほど時間がかかります（1レースあたり最大1.5秒程度）。")
+    run = st.sidebar.button("スキャンする", type="primary")
+
+    if not run:
+        st.info("左のサイドバーで条件を選び「スキャンする」を押してください。")
+        return
+
+    codes = [venue_code(v) for v in venues_multi] or list(VENUES.keys())
+    races = parse_race_range(races_text)
+    date_str = scan_date.strftime("%Y%m%d")
+    client = BoatraceClient(use_cache=use_cache)
+
+    total = max(len(codes) * len(races), 1)
+    progress = st.progress(0.0)
+    status = st.empty()
+
+    collected: list[dict] = []
+    ran = skipped = 0
+    for i, (code, race_number, _prediction, genres, error) in enumerate(
+        scan_races(client, codes, date_str, races), start=1
+    ):
+        progress.progress(min(i / total, 1.0))
+        status.text(f"{VENUES.get(code, code)} {race_number}R を確認中...（実行{ran} / スキップ{skipped}）")
+        if error is not None or genres is None:
+            skipped += 1
+            continue
+        ran += 1
+        for c in genres.get(genre, []):
+            collected.append(
+                {
+                    "場": VENUES.get(code, code),
+                    "R": race_number,
+                    "組番": c.label,
+                    "推定確率": c.probability * 100,
+                    "オッズ": c.odds,
+                    "期待値": c.expected_value,
+                }
+            )
+    status.empty()
+    progress.empty()
+    st.success(f"完了: {ran}レースを確認（{skipped}レースはスキップ）")
+
+    if not collected:
+        st.info("該当する候補が見つかりませんでした。")
+        return
+
+    sort_key = "期待値" if genre == GENRE_OOANA else "推定確率"
+    result_df = (
+        pd.DataFrame(collected).sort_values(sort_key, ascending=False).head(top_n).reset_index(drop=True)
+    )
+    st.dataframe(
+        result_df,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "推定確率": st.column_config.NumberColumn("推定確率", format="%.2f%%"),
+            "オッズ": st.column_config.NumberColumn("オッズ", format="%.1f倍"),
+            "期待値": st.column_config.NumberColumn(
+                "期待値", format="%.2f", help="推定確率×オッズ。1.0超で理論上は買い得の目安"
+            ),
+        },
+    )
+
+
 def _render_backtest_dashboard() -> None:
     st.title("予想の検証ダッシュボード")
     store = BacktestStore()
@@ -476,10 +559,12 @@ def _render_backtest_dashboard() -> None:
 
 
 def main() -> None:
-    page = st.sidebar.radio("ページ", ["レース予想", "検証ダッシュボード"])
+    page = st.sidebar.radio("ページ", ["レース予想", "狙い目スキャン", "検証ダッシュボード"])
     st.sidebar.divider()
     if page == "レース予想":
         _render_predict_page()
+    elif page == "狙い目スキャン":
+        _render_scan_page()
     else:
         _render_backtest_dashboard()
 

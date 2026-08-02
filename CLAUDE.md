@@ -31,6 +31,7 @@ src/kyotei/
     combos.py            # 推定勝率から買い目候補（3連単/2連単/3連複）をHarville近似で算出
     genres.py             # 買い目候補を本命/中穴/大穴に分類（推定確率×オッズ）
     allocation.py          # 予算を推定確率に比例して100円単位で配分
+    scan.py                 # 複数場・複数レース横断でジャンル別の狙い目候補を集める
   scraper/
     _text.py             # パーサー共通のテキスト正規化ヘルパー
     client.py           # boatrace.jp向けHTTPクライアント（レート制限・キャッシュ付き）
@@ -56,6 +57,7 @@ kyotei venues                                              # 場コード一覧
 kyotei predict --venue 桐生 --date 20260802 --race 1         # 予想・買い目候補・選手情報を表示
 kyotei backtest --venue 桐生 --date 20260731 --race 1         # 過去レース1件を答え合わせ
 kyotei backtest-day --date 20260731 --venues all --races 1-12  # 指定日をまとめて答え合わせ
+kyotei scan --date 20260802 --venues all --races 1-12 --genre 大穴  # 複数場・複数レース横断で狙い目候補を探す
 kyotei stats                                                # 蓄積した的中率・回収率を表示
 streamlit run web/app.py                                    # Webダッシュボード起動（ローカル）
 python -m pytest                                            # テスト実行
@@ -122,10 +124,12 @@ python -m pytest                                            # テスト実行
 
 ## 現状・今後
 - 出走表・直前情報・結果（払戻金含む）・3連単オッズの取得/パース、統計・ルールベース予想、
-  買い目候補算出（本命/中穴/大穴ジャンル分け）、予算配分、同日他レース結果表示、選手プロフィール
-  リンク、CLI（predict/backtest/backtest-day/stats）、Streamlitダッシュボード（予想画面・
-  検証画面）まで実装済み。全24場での動作確認済み。GitHub連携でStreamlit Community Cloudに
-  デプロイし、iPhone等からアクセス可能な状態。
+  買い目候補算出（本命/中穴/大穴ジャンル分け）、予算配分、同日他レース結果表示、複数場・複数
+  レース横断の狙い目スキャン（`scan.py`）、選手プロフィールリンク、CLI（predict/backtest/
+  backtest-day/scan/stats）、Streamlitダッシュボード（予想画面・狙い目スキャン画面・検証画面）
+  まで実装済み。全24場での動作確認済み。GitHub連携でStreamlit Community Cloudにデプロイし、
+  iPhone等からアクセス可能な状態。backtestデータ（`data/kyotei.db`）もgit管理下に置き、
+  ローカルで蓄積したデータをpushすればスマホ側にも反映される。
 - `scripts/collect_history.py`（過去日をまとめてbacktest・データ蓄積）と
   `scripts/tune_weights.py`（キャッシュ済みHTMLのみでネットワーク不要の重み検証・
   ランダムサーチ）も実装済み。一度データを蓄積すれば、以降の重み検証はネット
