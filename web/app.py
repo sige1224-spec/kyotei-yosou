@@ -16,6 +16,7 @@ import streamlit as st
 
 from kyotei.backtest import parse_race_range, run_day_backtest
 from kyotei.constants import VENUES, venue_code
+from kyotei.models.combos import exacta_candidates, trifecta_candidates
 from kyotei.models.predictor import predict_race
 from kyotei.scraper.beforeinfo import parse_beforeinfo_html
 from kyotei.scraper.client import BoatraceClient
@@ -55,7 +56,7 @@ def _fetch_prediction(code: str, date_str: str, race_number: int, use_cache: boo
 
 def _render_predict_page() -> None:
     st.title("競艇予想（統計・ルールベース）")
-    st.caption("※ 統計的な参考情報であり、的中を保証するものではありません。")
+    st.caption("※ 統計的な参考情報であり、的中・回収を保証するものではありません。舟券の購入判断はご自身で。")
 
     venue_name = st.sidebar.selectbox("競艇場", list(VENUES.values()))
     race_date = st.sidebar.date_input("開催日", value=date.today())
@@ -109,9 +110,82 @@ def _render_predict_page() -> None:
     )
     st.altair_chart((bar + labels).properties(height=320), width="stretch")
 
-    st.dataframe(
-        df.sort_values("推定勝率", ascending=False), width="stretch", hide_index=True
+    st.subheader("選手情報")
+    racer_df = pd.DataFrame(
+        [
+            {
+                "枠": e.lane,
+                "選手名": e.name,
+                "級別": e.racer_class,
+                "全国勝率": e.national_win_rate,
+                "当地勝率": e.local_win_rate,
+                "モーター2連率": e.motor_2nd_rate,
+                "ボート2連率": e.boat_2nd_rate,
+                "F数": e.flying_count,
+                "平均ST": e.avg_start_timing,
+            }
+            for e in sorted(prediction.race.entries, key=lambda x: x.lane)
+        ]
     )
+    st.dataframe(
+        racer_df,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "全国勝率": st.column_config.ProgressColumn(
+                "全国勝率", format="%.2f", min_value=0, max_value=8
+            ),
+            "当地勝率": st.column_config.ProgressColumn(
+                "当地勝率", format="%.2f", min_value=0, max_value=8
+            ),
+            "モーター2連率": st.column_config.ProgressColumn(
+                "モーター2連率", format="%.1f%%", min_value=0, max_value=100
+            ),
+            "ボート2連率": st.column_config.ProgressColumn(
+                "ボート2連率", format="%.1f%%", min_value=0, max_value=100
+            ),
+            "F数": st.column_config.NumberColumn("F数", help="フライング回数（多いほどリスク）"),
+            "平均ST": st.column_config.NumberColumn("平均ST", format="%.2f"),
+        },
+    )
+
+    st.subheader("買い目候補")
+    st.caption(
+        "各艇の推定勝率からHarvilleの公式で近似した組み合わせ確率。"
+        "実際のレース展開の相関までは考慮していない参考値。"
+    )
+    tab_trifecta, tab_exacta = st.tabs(["3連単", "2連単"])
+
+    with tab_trifecta:
+        trifecta_df = pd.DataFrame(
+            [
+                {"組番": t.label, "推定確率": t.probability * 100}
+                for t in trifecta_candidates(ranked, top_n=8)
+            ]
+        )
+        combo_bar = (
+            alt.Chart(trifecta_df)
+            .mark_bar(size=20, cornerRadiusTopLeft=4, cornerRadiusTopRight=4, color=CATEGORICAL_PALETTE[0])
+            .encode(
+                x=alt.X("組番:N", sort=None, title="組番（1着-2着-3着）"),
+                y=alt.Y("推定確率:Q", title="推定確率(%)"),
+                tooltip=["組番", alt.Tooltip("推定確率:Q", format=".2f")],
+            )
+        )
+        combo_labels = combo_bar.mark_text(dy=-8, color=INK_SECONDARY).encode(
+            text=alt.Text("推定確率:Q", format=".1f")
+        )
+        st.altair_chart((combo_bar + combo_labels).properties(height=280), width="stretch")
+        st.dataframe(trifecta_df, width="stretch", hide_index=True)
+
+    with tab_exacta:
+        exacta_df = pd.DataFrame(
+            [
+                {"組番": t.label, "推定確率": t.probability * 100}
+                for t in exacta_candidates(ranked, top_n=6)
+            ]
+        )
+        st.dataframe(exacta_df, width="stretch", hide_index=True)
 
     if before_info is not None and before_info.exhibitions:
         st.subheader("直前情報")
@@ -174,7 +248,8 @@ def _render_backtest_dashboard() -> None:
                     logs.append(
                         f"{outcome.venue_name} {outcome.race_number}R: "
                         f"予想1位={outcome.predicted_ranking[0]}号艇 "
-                        f"実際1着={outcome.actual_winner_lane}号艇 {mark}"
+                        f"実際1着={outcome.actual_winner_lane}号艇 {mark} "
+                        f"単勝払戻={outcome.tansho_payout}円"
                     )
                 log_area.text("\n".join(logs[-12:]))
             st.success(f"完了: 実行{ran}件 / スキップ{skipped}件")
@@ -184,44 +259,87 @@ def _render_backtest_dashboard() -> None:
     venue_filter_code = None if filter_venue == "すべて" else venue_code(filter_venue)
 
     stats = store.stats(venue_code=venue_filter_code)
+    st.markdown("##### 的中率")
     cols = st.columns(4)
     cols[0].metric("対象レース数", stats["count"])
     cols[1].metric("単勝的中率（予想1位）", f"{stats['top1_rate'] * 100:.1f}%")
     cols[2].metric("予想上位2以内", f"{stats['top2_rate'] * 100:.1f}%")
     cols[3].metric("予想上位3以内", f"{stats['top3_rate'] * 100:.1f}%")
 
+    st.markdown("##### 回収率（毎レース100円ずつ本命1点賭けした場合の試算。100%＝収支トントン）")
+    roi_cols = st.columns(3)
+    roi_cols[0].metric("単勝回収率", f"{stats['tansho_roi'] * 100:.1f}%")
+    roi_cols[1].metric("3連単的中率", f"{stats['trifecta_top1_rate'] * 100:.1f}%")
+    roi_cols[2].metric("3連単回収率", f"{stats['trifecta_roi'] * 100:.1f}%")
+
     daily = store.daily_stats(venue_code=venue_filter_code)
     if daily:
         daily_df = pd.DataFrame(daily)
-        label_map = {
+
+        st.markdown("##### 的中率の推移")
+        hit_label_map = {
             "top1_rate": "単勝的中(予想1位)",
             "top2_rate": "予想上位2以内",
             "top3_rate": "予想上位3以内",
         }
-        long_df = daily_df.melt(
+        hit_long_df = daily_df.melt(
             id_vars=["date", "count"],
-            value_vars=list(label_map.keys()),
+            value_vars=list(hit_label_map.keys()),
             var_name="指標",
-            value_name="的中率",
+            value_name="値",
         )
-        long_df["指標"] = long_df["指標"].map(label_map)
-        long_df["的中率"] = long_df["的中率"] * 100
+        hit_long_df["指標"] = hit_long_df["指標"].map(hit_label_map)
+        hit_long_df["値"] = hit_long_df["値"] * 100
 
-        line = (
-            alt.Chart(long_df)
+        hit_line = (
+            alt.Chart(hit_long_df)
             .mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=64, filled=True))
             .encode(
                 x=alt.X("date:O", title="日付"),
-                y=alt.Y("的中率:Q", title="的中率(%)", scale=alt.Scale(domain=[0, 100])),
+                y=alt.Y("値:Q", title="的中率(%)", scale=alt.Scale(domain=[0, 100])),
                 color=alt.Color(
                     "指標:N",
-                    scale=alt.Scale(domain=list(label_map.values()), range=CATEGORICAL_PALETTE[:3]),
+                    scale=alt.Scale(domain=list(hit_label_map.values()), range=CATEGORICAL_PALETTE[:3]),
                     legend=alt.Legend(title="指標"),
                 ),
-                tooltip=["date", "指標", alt.Tooltip("的中率:Q", format=".1f")],
+                tooltip=["date", "指標", alt.Tooltip("値:Q", format=".1f")],
             )
         )
-        st.altair_chart(line.properties(height=320), width="stretch")
+        st.altair_chart(hit_line.properties(height=300), width="stretch")
+
+        st.markdown("##### 回収率の推移")
+        roi_label_map = {"tansho_roi": "単勝回収率", "trifecta_roi": "3連単回収率"}
+        roi_long_df = daily_df.melt(
+            id_vars=["date", "count"],
+            value_vars=list(roi_label_map.keys()),
+            var_name="指標",
+            value_name="値",
+        )
+        roi_long_df["指標"] = roi_long_df["指標"].map(roi_label_map)
+        roi_long_df["値"] = roi_long_df["値"] * 100
+
+        roi_max = max(120.0, float(roi_long_df["値"].max()) * 1.15)
+        breakeven = alt.Chart(pd.DataFrame({"y": [100]})).mark_rule(
+            strokeDash=[4, 4], color=INK_SECONDARY
+        ).encode(y="y:Q")
+        roi_line = (
+            alt.Chart(roi_long_df)
+            .mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=64, filled=True))
+            .encode(
+                x=alt.X("date:O", title="日付"),
+                y=alt.Y("値:Q", title="回収率(%)", scale=alt.Scale(domain=[0, roi_max])),
+                color=alt.Color(
+                    "指標:N",
+                    scale=alt.Scale(
+                        domain=list(roi_label_map.values()), range=CATEGORICAL_PALETTE[3:5]
+                    ),
+                    legend=alt.Legend(title="指標"),
+                ),
+                tooltip=["date", "指標", alt.Tooltip("値:Q", format=".1f")],
+            )
+        )
+        st.altair_chart((roi_line + breakeven).properties(height=300), width="stretch")
+        st.caption("点線は回収率100%（収支トントン）の基準線。")
     else:
         st.info("まだbacktestデータがありません。上の「新しくbacktestを実行する」から実行してください。")
 
@@ -236,8 +354,9 @@ def _render_backtest_dashboard() -> None:
                 "predicted_ranking",
                 "actual_winner_lane",
                 "top1_hit",
-                "top2_hit",
-                "top3_hit",
+                "tansho_payout",
+                "trifecta_top1_hit",
+                "trifecta_top1_payout",
             ]
         ]
         st.dataframe(recent_df, width="stretch", hide_index=True)

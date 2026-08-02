@@ -19,6 +19,7 @@ import sys
 
 from kyotei.backtest import parse_race_range, run_day_backtest, run_single_backtest
 from kyotei.constants import VENUES, venue_code
+from kyotei.models.combos import exacta_candidates, trifecta_candidates
 from kyotei.models.entities import BeforeInfo, RacePrediction
 from kyotei.models.predictor import predict_race
 from kyotei.scraper.beforeinfo import parse_beforeinfo_html
@@ -31,16 +32,40 @@ def _format_prediction(prediction: RacePrediction, before_info: BeforeInfo | Non
     race = prediction.race
     lines = [
         f"{race.venue_name}（{race.venue_code}） {race.date} {race.race_number}R 予想",
-        "※ 統計的な参考情報であり、的中を保証するものではありません。",
+        "※ 統計的な参考情報であり、的中・回収を保証するものではありません。舟券の購入判断はご自身で。",
         "",
+        "[推定勝率]",
         f"{'枠':<3}{'選手名':<12}{'推定勝率':>10}",
     ]
     for p in prediction.as_rank_list():
         lines.append(f"{p.lane:<3}{p.racer_name:<12}{p.win_probability * 100:>9.1f}%")
 
+    lines.append("")
+    lines.append("[選手情報]")
+    lines.append(
+        f"{'枠':<3}{'級別':<5}{'全国勝率':>9}{'当地勝率':>9}"
+        f"{'モーター2連率':>13}{'ボート2連率':>12}{'F数':>5}{'平均ST':>8}"
+    )
+    for e in sorted(race.entries, key=lambda x: x.lane):
+        flying_flag = f"{e.flying_count}" + ("!" if e.flying_count > 0 else "")
+        lines.append(
+            f"{e.lane:<3}{e.racer_class:<5}{e.national_win_rate:>8.2f}%{e.local_win_rate:>8.2f}%"
+            f"{e.motor_2nd_rate:>12.1f}%{e.boat_2nd_rate:>11.1f}%{flying_flag:>5}{e.avg_start_timing:>8.2f}"
+        )
+
+    lines.append("")
+    lines.append("[買い目候補（3連単 上位6点、推定勝率からのHarville近似）]")
+    for t in trifecta_candidates(prediction.predictions, top_n=6):
+        lines.append(f"{t.label:<10}{t.probability * 100:>6.1f}%")
+    lines.append("")
+    lines.append("[買い目候補（2連単 上位3点）]")
+    for t in exacta_candidates(prediction.predictions, top_n=3):
+        lines.append(f"{t.label:<10}{t.probability * 100:>6.1f}%")
+
     if before_info is not None:
         lines.append("")
         if before_info.exhibitions:
+            lines.append("[直前情報]")
             lines.append(f"{'枠':<3}{'展示T':>7}{'進入':>6}{'調整体重':>9}")
             for e in sorted(before_info.exhibitions, key=lambda x: x.lane):
                 course = e.entry_course if e.entry_course is not None else "-"
@@ -51,7 +76,7 @@ def _format_prediction(prediction: RacePrediction, before_info: BeforeInfo | Non
             w = before_info.weather
             lines.append("")
             lines.append(
-                f"気象情報（{w.measured_at}）: {w.weather} 気温{w.temperature}℃ "
+                f"[気象情報]（{w.measured_at}）: {w.weather} 気温{w.temperature}℃ "
                 f"風速{w.wind_speed}m 水温{w.water_temperature}℃ 波高{w.wave_height}cm"
             )
     else:
@@ -90,12 +115,15 @@ def cmd_venues(_args: argparse.Namespace) -> int:
 
 def _format_outcome(outcome: BacktestOutcome) -> str:
     hit_mark = "◎的中" if outcome.top1_hit else "✕"
+    trifecta_mark = "◎的中" if outcome.trifecta_top1_hit else "✕"
     return (
         f"{outcome.venue_name} {outcome.date} {outcome.race_number}R: "
         f"予想1位={outcome.predicted_ranking[0]}号艇 / "
         f"実際1着={outcome.actual_winner_lane}号艇 {hit_mark} "
         f"(上位2着以内={'○' if outcome.top2_hit else '✕'}, "
-        f"上位3着以内={'○' if outcome.top3_hit else '✕'})"
+        f"上位3着以内={'○' if outcome.top3_hit else '✕'}, "
+        f"単勝払戻={outcome.tansho_payout}円, "
+        f"3連単本命{trifecta_mark}払戻={outcome.trifecta_top1_payout}円)"
     )
 
 
@@ -142,6 +170,10 @@ def cmd_backtest_day(args: argparse.Namespace) -> int:
             f"/ 上位2着以内={stats['top2_rate'] * 100:.1f}% "
             f"/ 上位3着以内={stats['top3_rate'] * 100:.1f}%"
         )
+        print(
+            f"本日分 回収率: 単勝(本命1点)={stats['tansho_roi'] * 100:.1f}% "
+            f"/ 3連単(本命1点)={stats['trifecta_roi'] * 100:.1f}%"
+        )
     return 0
 
 
@@ -153,9 +185,16 @@ def cmd_stats(args: argparse.Namespace) -> int:
         print("該当するbacktestデータがありません。先に `kyotei backtest` を実行してください。")
         return 0
     print(f"対象レース数: {stats['count']}")
+    print()
+    print("[的中率]")
     print(f"単勝的中率（予想1位＝実際1着）: {stats['top1_rate'] * 100:.1f}%")
     print(f"予想上位2艇以内に実際の1着: {stats['top2_rate'] * 100:.1f}%")
     print(f"予想上位3艇以内に実際の1着: {stats['top3_rate'] * 100:.1f}%")
+    print(f"3連単本命的中率: {stats['trifecta_top1_rate'] * 100:.1f}%")
+    print()
+    print("[回収率（毎レース100円ずつ本命1点賭けした場合の試算。100%＝収支トントン）]")
+    print(f"単勝: {stats['tansho_roi'] * 100:.1f}%")
+    print(f"3連単: {stats['trifecta_roi'] * 100:.1f}%")
     return 0
 
 

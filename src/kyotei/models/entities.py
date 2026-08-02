@@ -105,18 +105,32 @@ class RaceResultEntry:
 
 
 @dataclass
+class Payout:
+    """1組番ぶんの払戻金情報。"""
+
+    bet_type: str  # "3連単" / "3連複" / "2連単" / "2連複" / "拡連複" / "単勝" / "複勝"
+    combination: str  # 例: "3-4-5"（3連単/2連単）, "3=4=5"（3連複等）, "3"（単勝/複勝）
+    amount: int  # 払戻金額(円)。100円購入した場合の払戻額
+    popularity: int | None  # 人気順位（単勝・複勝は非公開のためNone）
+
+
+@dataclass
 class RaceResult:
     venue_code: str
     venue_name: str
     date: str
     race_number: int
     entries: list[RaceResultEntry] = field(default_factory=list)
+    payouts: list[Payout] = field(default_factory=list)
 
     def winner_lane(self) -> int | None:
         for e in self.entries:
             if e.rank == 1:
                 return e.lane
         return None
+
+    def payouts_for(self, bet_type: str) -> list[Payout]:
+        return [p for p in self.payouts if p.bet_type == bet_type]
 
 
 @dataclass

@@ -1,8 +1,13 @@
-"""予想の答え合わせ・的中率検証結果を蓄積するローカルSQLiteストア。
+"""予想の答え合わせ・的中率・回収率を蓄積するローカルSQLiteストア。
 
 `kyotei backtest` / `kyotei backtest-day` で過去のレースについて
 「その時点の出走表データで予想したら実際の結果と比べてどうだったか」を
-継続的に記録し、`kyotei stats` で的中率を確認できるようにする。
+継続的に記録し、`kyotei stats` で的中率・回収率を確認できるようにする。
+
+回収率は、実際にレース結果ページに掲載されている払戻金（100円購入時の金額）を
+そのまま使って算出する試算値。舟券を実際に購入したわけではなく、あくまで
+「毎レース同じ買い方をしていたら」という仮定に基づくシミュレーションであり、
+将来の回収を保証するものではない。
 """
 from __future__ import annotations
 
@@ -13,6 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from kyotei.models.combos import trifecta_candidates
 from kyotei.models.entities import RacePrediction, RaceResult
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "kyotei.db"
@@ -32,9 +38,19 @@ CREATE TABLE IF NOT EXISTS backtests (
     top1_hit INTEGER NOT NULL,
     top2_hit INTEGER NOT NULL,
     top3_hit INTEGER NOT NULL,
+    tansho_payout INTEGER NOT NULL DEFAULT 0,
+    trifecta_top1_hit INTEGER NOT NULL DEFAULT 0,
+    trifecta_top1_payout INTEGER NOT NULL DEFAULT 0,
     UNIQUE(venue_code, date, race_number)
 );
 """
+
+# 既存DBに後から追加したカラム。古いDBファイルにはALTER TABLEで補う。
+_MIGRATION_COLUMNS = [
+    ("tansho_payout", "INTEGER NOT NULL DEFAULT 0"),
+    ("trifecta_top1_hit", "INTEGER NOT NULL DEFAULT 0"),
+    ("trifecta_top1_payout", "INTEGER NOT NULL DEFAULT 0"),
+]
 
 
 @dataclass
@@ -44,6 +60,9 @@ class BacktestOutcome:
     top1_hit: 予想1位のレーンが実際に1着だったか
     top2_hit: 実際の1着が予想上位2レーン以内に入っていたか
     top3_hit: 実際の1着が予想上位3レーン以内に入っていたか
+    tansho_payout: 予想1位のレーンに単勝100円を賭けていた場合の払戻金（円、外れなら0）
+    trifecta_top1_hit: 3連単の最有力候補（Harville近似1位）が的中したか
+    trifecta_top1_payout: その3連単候補に100円を賭けていた場合の払戻金（円、外れなら0）
     """
 
     venue_code: str
@@ -57,10 +76,13 @@ class BacktestOutcome:
     top1_hit: bool
     top2_hit: bool
     top3_hit: bool
+    tansho_payout: int = 0
+    trifecta_top1_hit: bool = False
+    trifecta_top1_payout: int = 0
 
 
 def evaluate_prediction(prediction: RacePrediction, result: RaceResult) -> BacktestOutcome:
-    """予想結果と実際のレース結果を突き合わせる。"""
+    """予想結果と実際のレース結果（着順・払戻金）を突き合わせる。"""
     ranked = prediction.as_rank_list()
     predicted_ranking = [p.lane for p in ranked]
     win_probabilities = {p.lane: p.win_probability for p in ranked}
@@ -72,6 +94,25 @@ def evaluate_prediction(prediction: RacePrediction, result: RaceResult) -> Backt
     top1_hit = actual_winner_lane is not None and predicted_ranking[:1] == [actual_winner_lane]
     top2_hit = actual_winner_lane is not None and actual_winner_lane in predicted_ranking[:2]
     top3_hit = actual_winner_lane is not None and actual_winner_lane in predicted_ranking[:3]
+
+    tansho_payout = 0
+    if predicted_ranking:
+        top_lane = str(predicted_ranking[0])
+        for payout in result.payouts_for("単勝"):
+            if payout.combination == top_lane:
+                tansho_payout = payout.amount
+                break
+
+    trifecta_top1_hit = False
+    trifecta_top1_payout = 0
+    top_trifecta = trifecta_candidates(ranked, top_n=1)
+    if top_trifecta:
+        predicted_label = top_trifecta[0].label
+        for payout in result.payouts_for("3連単"):
+            if payout.combination == predicted_label:
+                trifecta_top1_hit = True
+                trifecta_top1_payout = payout.amount
+                break
 
     return BacktestOutcome(
         venue_code=prediction.race.venue_code,
@@ -85,6 +126,9 @@ def evaluate_prediction(prediction: RacePrediction, result: RaceResult) -> Backt
         top1_hit=bool(top1_hit),
         top2_hit=bool(top2_hit),
         top3_hit=bool(top3_hit),
+        tansho_payout=tansho_payout,
+        trifecta_top1_hit=trifecta_top1_hit,
+        trifecta_top1_payout=trifecta_top1_payout,
     )
 
 
@@ -96,6 +140,10 @@ class BacktestStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.db_path)) as conn:
             conn.executescript(_SCHEMA)
+            existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(backtests)")}
+            for column, coltype in _MIGRATION_COLUMNS:
+                if column not in existing_columns:
+                    conn.execute(f"ALTER TABLE backtests ADD COLUMN {column} {coltype}")
             conn.commit()
 
     def save(self, outcome: BacktestOutcome) -> None:
@@ -105,8 +153,9 @@ class BacktestStore:
                 INSERT INTO backtests (
                     venue_code, venue_name, date, race_number, evaluated_at,
                     predicted_ranking, win_probabilities, actual_ranking,
-                    actual_winner_lane, top1_hit, top2_hit, top3_hit
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    actual_winner_lane, top1_hit, top2_hit, top3_hit,
+                    tansho_payout, trifecta_top1_hit, trifecta_top1_payout
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(venue_code, date, race_number) DO UPDATE SET
                     evaluated_at=excluded.evaluated_at,
                     predicted_ranking=excluded.predicted_ranking,
@@ -115,7 +164,10 @@ class BacktestStore:
                     actual_winner_lane=excluded.actual_winner_lane,
                     top1_hit=excluded.top1_hit,
                     top2_hit=excluded.top2_hit,
-                    top3_hit=excluded.top3_hit
+                    top3_hit=excluded.top3_hit,
+                    tansho_payout=excluded.tansho_payout,
+                    trifecta_top1_hit=excluded.trifecta_top1_hit,
+                    trifecta_top1_payout=excluded.trifecta_top1_payout
                 """,
                 (
                     outcome.venue_code,
@@ -130,6 +182,9 @@ class BacktestStore:
                     int(outcome.top1_hit),
                     int(outcome.top2_hit),
                     int(outcome.top3_hit),
+                    outcome.tansho_payout,
+                    int(outcome.trifecta_top1_hit),
+                    outcome.trifecta_top1_payout,
                 ),
             )
             conn.commit()
@@ -140,7 +195,10 @@ class BacktestStore:
         date_from: str | None = None,
         date_to: str | None = None,
     ) -> dict:
-        query = "SELECT top1_hit, top2_hit, top3_hit FROM backtests WHERE 1=1"
+        query = (
+            "SELECT top1_hit, top2_hit, top3_hit, tansho_payout, "
+            "trifecta_top1_hit, trifecta_top1_payout FROM backtests WHERE 1=1"
+        )
         params: list[str] = []
         if venue_code:
             query += " AND venue_code = ?"
@@ -157,23 +215,40 @@ class BacktestStore:
 
         count = len(rows)
         if count == 0:
-            return {"count": 0, "top1_rate": 0.0, "top2_rate": 0.0, "top3_rate": 0.0}
+            return {
+                "count": 0,
+                "top1_rate": 0.0,
+                "top2_rate": 0.0,
+                "top3_rate": 0.0,
+                "tansho_roi": 0.0,
+                "trifecta_top1_rate": 0.0,
+                "trifecta_roi": 0.0,
+            }
 
         top1 = sum(r[0] for r in rows)
         top2 = sum(r[1] for r in rows)
         top3 = sum(r[2] for r in rows)
+        tansho_total = sum(r[3] for r in rows)
+        trifecta_hit = sum(r[4] for r in rows)
+        trifecta_total = sum(r[5] for r in rows)
+        stake = count * 100
         return {
             "count": count,
             "top1_rate": top1 / count,
             "top2_rate": top2 / count,
             "top3_rate": top3 / count,
+            # 回収率は100%＝収支トントン。1.0を超えていれば黒字、下回れば赤字。
+            "tansho_roi": tansho_total / stake,
+            "trifecta_top1_rate": trifecta_hit / count,
+            "trifecta_roi": trifecta_total / stake,
         }
 
     def daily_stats(self, venue_code: str | None = None) -> list[dict]:
-        """日付ごとの的中率推移（ダッシュボードのグラフ表示用）。"""
+        """日付ごとの的中率・回収率推移（ダッシュボードのグラフ表示用）。"""
         query = (
             "SELECT date, "
             "SUM(top1_hit) AS top1, SUM(top2_hit) AS top2, SUM(top3_hit) AS top3, "
+            "SUM(tansho_payout) AS tansho_total, SUM(trifecta_top1_payout) AS trifecta_total, "
             "COUNT(*) AS count "
             "FROM backtests WHERE 1=1"
         )
@@ -189,10 +264,12 @@ class BacktestStore:
         return [
             {
                 "date": r[0],
-                "top1_rate": r[1] / r[4],
-                "top2_rate": r[2] / r[4],
-                "top3_rate": r[3] / r[4],
-                "count": r[4],
+                "top1_rate": r[1] / r[6],
+                "top2_rate": r[2] / r[6],
+                "top3_rate": r[3] / r[6],
+                "tansho_roi": r[4] / (r[6] * 100),
+                "trifecta_roi": r[5] / (r[6] * 100),
+                "count": r[6],
             }
             for r in rows
         ]
