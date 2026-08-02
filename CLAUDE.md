@@ -66,8 +66,13 @@ python -m pytest                                            # テスト実行
 - Streamlit Community Cloud で `web/app.py` をデプロイ済み（ユーザー自身のアカウントで
   操作。Claude側ではGitHub push までしか行えない）。masterブランチにpushすると
   Streamlit Cloud側が自動で再デプロイする。
-- `requirements.txt` は `-e .[web]` のみを記載（pyproject.tomlの依存関係を使う構成）。
-  src-layoutのため、これがないとクラウド上で `kyotei` パッケージがimportできない点に注意。
+- `requirements.txt` はサードパーティ依存だけを列挙する構成（`-e .[web]` は使わない）。
+  以前 `-e .[web]` にしていたところ、Streamlit Cloud側でeditable installが正しく
+  反映されず `kyotei.constants` に新しい関数が無い状態で古いまま実行されて
+  `ImportError` になった実績がある（2026-08-02）。src-layoutのため、代わりに
+  `web/app.py` の先頭で `sys.path.insert(0, .../src)` して直接importする方式にして
+  回避している。変更時はkyoteiを一切pipインストールしていないクリーンなvenvで
+  動作確認してから push すること。
 - クラウド上は `data/cache`・`data/kyotei.db` が再デプロイのたびにリセットされる
   （ローカルのbacktest蓄積データはクラウドには引き継がれない）。
 
