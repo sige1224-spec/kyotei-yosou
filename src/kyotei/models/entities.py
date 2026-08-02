@@ -142,6 +142,41 @@ class RaceResult:
 
 
 @dataclass
+class RecentMeetingResult:
+    """選手の「過去3節成績」1節分のデータ（boatrace.jp選手プロフィールback3ページ）。"""
+
+    period: str  # 例: "2026/07/10 ～ 2026/07/15"
+    venue_name: str
+    title: str  # 開催名
+    raw_labels: list[str]  # 各レースの着順表示そのまま（"1"等の数字の他、"F"/"L"/転覆などもありうる）
+    finishes: list[int]  # raw_labelsを数値化したもの。数字でない着順（F/L/転等）は0
+
+    def numeric_finishes(self) -> list[int]:
+        return [f for f in self.finishes if f > 0]
+
+
+@dataclass
+class RecentForm:
+    """選手の直近（過去3節）成績まとめ。"""
+
+    racer_id: int
+    meetings: list[RecentMeetingResult] = field(default_factory=list)
+
+    def all_finishes(self) -> list[int]:
+        return [f for m in self.meetings for f in m.numeric_finishes()]
+
+    def average_finish(self) -> float | None:
+        finishes = self.all_finishes()
+        return sum(finishes) / len(finishes) if finishes else None
+
+    def top3_rate(self) -> float | None:
+        finishes = self.all_finishes()
+        if not finishes:
+            return None
+        return sum(1 for f in finishes if f <= 3) / len(finishes) * 100
+
+
+@dataclass
 class LanePrediction:
     """レーン単位の予想スコア。"""
 

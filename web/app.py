@@ -40,6 +40,7 @@ from kyotei.scraper.beforeinfo import parse_beforeinfo_html
 from kyotei.scraper.client import BoatraceClient
 from kyotei.scraper.odds import parse_odds3t_html
 from kyotei.scraper.racelist import parse_racelist_html
+from kyotei.scraper.racerform import parse_racer_back3_html
 from kyotei.storage import BacktestStore
 
 # 検証済みカテゴリカルパレット（dataviz skill 参照）。固定順序で使い、循環させない。
@@ -78,6 +79,19 @@ def _fetch_prediction(code: str, date_str: str, race_number: int, use_cache: boo
     return before_info, odds_list, prediction
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_recent_forms(racer_ids: tuple[int, ...], use_cache: bool):
+    client = BoatraceClient(use_cache=use_cache)
+    forms = {}
+    for racer_id in racer_ids:
+        try:
+            html = client.get_racer_back3_html(racer_id)
+            forms[racer_id] = parse_racer_back3_html(html, racer_id)
+        except Exception:
+            forms[racer_id] = None
+    return forms
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def _fetch_earlier_results(code: str, date_str: str, race_number: int, use_cache: bool):
     if race_number <= 1:
@@ -94,6 +108,9 @@ def _render_predict_page() -> None:
     race_date = st.sidebar.date_input("開催日", value=date.today())
     race_number = st.sidebar.selectbox("レース番号", list(range(1, 13)), format_func=lambda n: f"{n}R")
     use_cache = st.sidebar.checkbox("ローカルキャッシュを使う", value=True)
+    show_recent_form = st.sidebar.checkbox(
+        "直近成績（過去3節）も取得する", value=True, help="選手6人分で追加リクエストが発生し表示が少し遅くなる"
+    )
     run = st.sidebar.button("予想する", type="primary")
 
     if not run:
@@ -145,47 +162,61 @@ def _render_predict_page() -> None:
     st.altair_chart((bar + labels).properties(height=320), width="stretch")
 
     st.subheader("選手情報")
-    racer_df = pd.DataFrame(
-        [
-            {
-                "枠": e.lane,
-                "選手名": e.name,
-                "級別": e.racer_class,
-                "全国勝率": e.national_win_rate,
-                "当地勝率": e.local_win_rate,
-                "モーター2連率": e.motor_2nd_rate,
-                "ボート2連率": e.boat_2nd_rate,
-                "F数": e.flying_count,
-                "平均ST": e.avg_start_timing,
-                "プロフィール": racer_profile_url(e.racer_id),
-            }
-            for e in sorted(prediction.race.entries, key=lambda x: x.lane)
-        ]
-    )
-    st.dataframe(
-        racer_df,
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "全国勝率": st.column_config.ProgressColumn(
-                "全国勝率", format="%.2f", min_value=0, max_value=8
-            ),
-            "当地勝率": st.column_config.ProgressColumn(
-                "当地勝率", format="%.2f", min_value=0, max_value=8
-            ),
-            "モーター2連率": st.column_config.ProgressColumn(
-                "モーター2連率", format="%.1f%%", min_value=0, max_value=100
-            ),
-            "ボート2連率": st.column_config.ProgressColumn(
-                "ボート2連率", format="%.1f%%", min_value=0, max_value=100
-            ),
-            "F数": st.column_config.NumberColumn("F数", help="フライング回数（多いほどリスク）"),
-            "平均ST": st.column_config.NumberColumn("平均ST", format="%.2f"),
-            "プロフィール": st.column_config.LinkColumn(
-                "プロフィール", display_text="boatrace.jpで見る"
-            ),
-        },
-    )
+    recent_forms = {}
+    if show_recent_form:
+        with st.spinner("直近成績（過去3節）を取得中..."):
+            recent_forms = _fetch_recent_forms(
+                tuple(e.racer_id for e in prediction.race.entries), use_cache
+            )
+
+    racer_rows = []
+    for e in sorted(prediction.race.entries, key=lambda x: x.lane):
+        row = {
+            "枠": e.lane,
+            "選手名": e.name,
+            "級別": e.racer_class,
+            "全国勝率": e.national_win_rate,
+            "当地勝率": e.local_win_rate,
+            "モーター2連率": e.motor_2nd_rate,
+            "ボート2連率": e.boat_2nd_rate,
+            "F数": e.flying_count,
+            "平均ST": e.avg_start_timing,
+            "プロフィール": racer_profile_url(e.racer_id),
+        }
+        if show_recent_form:
+            form = recent_forms.get(e.racer_id)
+            row["直近平均着順"] = form.average_finish() if form else None
+            row["直近3着内率"] = form.top3_rate() if form else None
+        racer_rows.append(row)
+    racer_df = pd.DataFrame(racer_rows)
+
+    column_config = {
+        "全国勝率": st.column_config.ProgressColumn(
+            "全国勝率", format="%.2f", min_value=0, max_value=8
+        ),
+        "当地勝率": st.column_config.ProgressColumn(
+            "当地勝率", format="%.2f", min_value=0, max_value=8
+        ),
+        "モーター2連率": st.column_config.ProgressColumn(
+            "モーター2連率", format="%.1f%%", min_value=0, max_value=100
+        ),
+        "ボート2連率": st.column_config.ProgressColumn(
+            "ボート2連率", format="%.1f%%", min_value=0, max_value=100
+        ),
+        "F数": st.column_config.NumberColumn("F数", help="フライング回数（多いほどリスク）"),
+        "平均ST": st.column_config.NumberColumn("平均ST", format="%.2f"),
+        "プロフィール": st.column_config.LinkColumn(
+            "プロフィール", display_text="boatrace.jpで見る"
+        ),
+    }
+    if show_recent_form:
+        column_config["直近平均着順"] = st.column_config.NumberColumn(
+            "直近平均着順", format="%.1f", help="過去3節・boatrace.jp「過去3節成績」より算出。参考情報で予想スコアには未反映"
+        )
+        column_config["直近3着内率"] = st.column_config.NumberColumn(
+            "直近3着内率", format="%.0f%%"
+        )
+    st.dataframe(racer_df, width="stretch", hide_index=True, column_config=column_config)
 
     st.subheader("買い目候補（3連単）")
     st.caption(

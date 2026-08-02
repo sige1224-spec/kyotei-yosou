@@ -93,6 +93,14 @@ class BoatraceClient:
             cache_key,
         )
 
+    def get_racer_back3_html(self, racer_id: int) -> str:
+        cache_key = f"back3_{racer_id}"
+        return self.get_html(
+            "/owpc/pc/data/racersearch/back3",
+            {"toban": str(racer_id)},
+            cache_key,
+        )
+
     def get_raceresult_html(self, venue_code: str, date: str, race_number: int) -> str:
         cache_key = f"raceresult_{venue_code}_{date}_{race_number}"
         return self.get_html(

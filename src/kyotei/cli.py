@@ -33,13 +33,23 @@ from kyotei.models.genres import (
     MID_ODDS_MIN,
     categorize_trifecta,
 )
+from kyotei.models.entities import RecentForm
 from kyotei.models.predictor import predict_race
 from kyotei.models.scan import top_candidates
 from kyotei.scraper.beforeinfo import parse_beforeinfo_html
 from kyotei.scraper.client import BoatraceClient
 from kyotei.scraper.odds import parse_odds3t_html
 from kyotei.scraper.racelist import parse_racelist_html
+from kyotei.scraper.racerform import parse_racer_back3_html
 from kyotei.storage import BacktestOutcome, BacktestStore
+
+
+def _fetch_recent_form(client: BoatraceClient, racer_id: int) -> RecentForm | None:
+    try:
+        html = client.get_racer_back3_html(racer_id)
+        return parse_racer_back3_html(html, racer_id)
+    except Exception:
+        return None
 
 
 def _format_prediction(
@@ -48,6 +58,7 @@ def _format_prediction(
     before_info: BeforeInfo | None,
     odds_list: list[TrifectaOdds] | None,
     budget: int | None,
+    recent_forms: dict[int, RecentForm | None] | None = None,
 ) -> str:
     race = prediction.race
     lines = [
@@ -77,6 +88,25 @@ def _format_prediction(
     lines.append("[選手プロフィール（BOATRACE公式サイト）]")
     for e in sorted(race.entries, key=lambda x: x.lane):
         lines.append(f"{e.lane}  {e.name}: {racer_profile_url(e.racer_id)}")
+
+    if recent_forms is not None:
+        lines.append("")
+        lines.append("[直近成績（過去3節、参考情報。予想スコアには未反映）]")
+        for e in sorted(race.entries, key=lambda x: x.lane):
+            form = recent_forms.get(e.racer_id)
+            if form is None or not form.meetings:
+                lines.append(f"{e.lane}  {e.name}: データなし")
+                continue
+            avg = form.average_finish()
+            top3 = form.top3_rate()
+            avg_text = f"平均着順{avg:.1f}" if avg is not None else "平均着順-"
+            top3_text = f"3着内率{top3:.0f}%" if top3 is not None else "3着内率-"
+            latest = form.meetings[0]
+            sequence = "".join(latest.raw_labels)
+            lines.append(
+                f"{e.lane}  {e.name}: {avg_text} {top3_text}"
+                f"（直近節 {latest.venue_name} {sequence}）"
+            )
 
     lines.append("")
     lines.append("[買い目候補（3連単）]")
@@ -184,7 +214,16 @@ def cmd_predict(args: argparse.Namespace) -> int:
     before_info = _fetch_before_info(client, code, args.date, args.race)
     odds_list = _fetch_odds(client, code, args.date, args.race)
     prediction = predict_race(race, before_info=before_info)
-    print(_format_prediction(client, prediction, before_info, odds_list, args.budget))
+    recent_forms = None
+    if not args.no_recent_form:
+        recent_forms = {
+            e.racer_id: _fetch_recent_form(client, e.racer_id) for e in race.entries
+        }
+    print(
+        _format_prediction(
+            client, prediction, before_info, odds_list, args.budget, recent_forms
+        )
+    )
     return 0
 
 
@@ -321,6 +360,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     predict_parser.add_argument(
         "--no-cache", action="store_true", help="ローカルキャッシュを使わず毎回取得する"
+    )
+    predict_parser.add_argument(
+        "--no-recent-form",
+        action="store_true",
+        help="選手の直近成績（過去3節）取得をスキップする（6選手分で追加リクエストが発生するため）",
     )
     predict_parser.set_defaults(func=cmd_predict)
 
