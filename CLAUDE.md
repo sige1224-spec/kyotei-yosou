@@ -73,8 +73,14 @@ python -m pytest                                            # テスト実行
   `web/app.py` の先頭で `sys.path.insert(0, .../src)` して直接importする方式にして
   回避している。変更時はkyoteiを一切pipインストールしていないクリーンなvenvで
   動作確認してから push すること。
-- クラウド上は `data/cache`・`data/kyotei.db` が再デプロイのたびにリセットされる
-  （ローカルのbacktest蓄積データはクラウドには引き継がれない）。
+- クラウド上は `data/cache` が再デプロイのたびにリセットされる（HTMLキャッシュはクラウドには
+  引き継がれない）。`data/kyotei.db` は2026-08-02以降 `.gitignore` の対象から外し
+  （`!data/kyotei.db` で明示的に追跡）、リポジトリにコミットする運用にしている。
+  そのため **ローカルで `backtest`/`backtest-day` を実行してデータを蓄積したら、
+  `git add data/kyotei.db && git commit && git push` でコミットしないとスマホ側
+  （Streamlit Cloud）の検証ダッシュボードには反映されない**（自動同期ではなく手動push時点の
+  スナップショット）。DBサイズは2026-08-02時点で483レース分で約160KB。1万レース分でも
+  数MB程度の見込みでgit管理上の問題は当面ない。
 
 ## 開発方針・注意点
 - データ取得: boatrace.jp をスクレイピング（robots.txtで全面許可を確認済み）。

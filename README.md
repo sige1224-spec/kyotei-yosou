@@ -38,6 +38,16 @@ kyotei stats
 kyotei stats --venue 桐生 --from 20260701 --to 20260731
 ```
 
+`data/kyotei.db` はリポジトリにコミットする運用にしている。ローカルでbacktestを実行して
+データを蓄積したら、以下でpushするとスマホ（Streamlit Cloud）側の検証ダッシュボードにも
+反映される。
+
+```powershell
+git add data/kyotei.db
+git commit -m "Update backtest data"
+git push
+```
+
 ## 使い方（Webダッシュボード）
 
 ```powershell
