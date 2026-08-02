@@ -44,6 +44,15 @@ COURSE_WIN_RATE: dict[int, float] = {
 }
 
 
+BOATRACE_BASE_URL = "https://www.boatrace.jp"
+RACER_PROFILE_PATH = "/owpc/pc/data/racersearch/profile"
+
+
+def racer_profile_url(racer_id: int) -> str:
+    """選手登録番号(toban)から、BOATRACE公式サイトの選手プロフィールページURLを返す。"""
+    return f"{BOATRACE_BASE_URL}{RACER_PROFILE_PATH}?toban={racer_id}"
+
+
 def venue_code(name_or_code: str) -> str:
     """場名または場コードを受け取り、2桁の場コード文字列を返す。"""
     if name_or_code in VENUES:

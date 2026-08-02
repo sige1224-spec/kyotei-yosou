@@ -15,7 +15,7 @@ import pandas as pd
 import streamlit as st
 
 from kyotei.backtest import parse_race_range, run_day_backtest
-from kyotei.constants import VENUES, venue_code
+from kyotei.constants import VENUES, racer_profile_url, venue_code
 from kyotei.models.combos import exacta_candidates, trifecta_candidates
 from kyotei.models.predictor import predict_race
 from kyotei.scraper.beforeinfo import parse_beforeinfo_html
@@ -123,6 +123,7 @@ def _render_predict_page() -> None:
                 "ボート2連率": e.boat_2nd_rate,
                 "F数": e.flying_count,
                 "平均ST": e.avg_start_timing,
+                "プロフィール": racer_profile_url(e.racer_id),
             }
             for e in sorted(prediction.race.entries, key=lambda x: x.lane)
         ]
@@ -146,6 +147,9 @@ def _render_predict_page() -> None:
             ),
             "F数": st.column_config.NumberColumn("F数", help="フライング回数（多いほどリスク）"),
             "平均ST": st.column_config.NumberColumn("平均ST", format="%.2f"),
+            "プロフィール": st.column_config.LinkColumn(
+                "プロフィール", display_text="boatrace.jpで見る"
+            ),
         },
     )
 

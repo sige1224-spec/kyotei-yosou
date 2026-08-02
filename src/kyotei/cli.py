@@ -18,7 +18,7 @@ import argparse
 import sys
 
 from kyotei.backtest import parse_race_range, run_day_backtest, run_single_backtest
-from kyotei.constants import VENUES, venue_code
+from kyotei.constants import VENUES, racer_profile_url, venue_code
 from kyotei.models.combos import exacta_candidates, trifecta_candidates
 from kyotei.models.entities import BeforeInfo, RacePrediction
 from kyotei.models.predictor import predict_race
@@ -52,6 +52,11 @@ def _format_prediction(prediction: RacePrediction, before_info: BeforeInfo | Non
             f"{e.lane:<3}{e.racer_class:<5}{e.national_win_rate:>8.2f}%{e.local_win_rate:>8.2f}%"
             f"{e.motor_2nd_rate:>12.1f}%{e.boat_2nd_rate:>11.1f}%{flying_flag:>5}{e.avg_start_timing:>8.2f}"
         )
+
+    lines.append("")
+    lines.append("[選手プロフィール（BOATRACE公式サイト）]")
+    for e in sorted(race.entries, key=lambda x: x.lane):
+        lines.append(f"{e.lane}  {e.name}: {racer_profile_url(e.racer_id)}")
 
     lines.append("")
     lines.append("[買い目候補（3連単 上位6点、推定勝率からのHarville近似）]")
