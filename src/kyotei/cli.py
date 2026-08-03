@@ -10,6 +10,11 @@
     kyotei scan --date 20260802 --venues all --races 1-12 --genre 大穴 --top 10
     kyotei stats
     kyotei stats --venue 桐生 --from 20260701 --to 20260731
+    kyotei patterns
+    kyotei favorite add-racer 4300 --label 加藤綾
+    kyotei favorite add-venue 桐生
+    kyotei favorite list
+    kyotei today --date 20260802
 
 全24競艇場で同じテンプレートのページを使用しているため、--venue には
 場名（例: 桐生）または2桁の場コード（例: 01）のどちらも指定できる。
@@ -23,8 +28,8 @@ from kyotei.backtest import parse_race_range, run_day_backtest, run_single_backt
 from kyotei.constants import VENUES, racer_profile_url, raceresult_url, venue_code
 from kyotei.dayview import fetch_day_results
 from kyotei.models.allocation import allocate_budget
-from kyotei.models.combos import exacta_candidates
-from kyotei.models.entities import BeforeInfo, RacePrediction, TrifectaOdds
+from kyotei.models.combos import exacta_candidates, trifecta_candidates
+from kyotei.models.entities import BeforeInfo, RacePrediction, RecentForm, TrifectaOdds
 from kyotei.models.genres import (
     GENRE_CHUANA,
     GENRE_HONMEI,
@@ -33,15 +38,23 @@ from kyotei.models.genres import (
     MID_ODDS_MIN,
     categorize_trifecta,
 )
-from kyotei.models.entities import RecentForm
 from kyotei.models.predictor import predict_race
 from kyotei.models.scan import top_candidates
+from kyotei.predictionlog import compare_logged_predictions
 from kyotei.scraper.beforeinfo import parse_beforeinfo_html
 from kyotei.scraper.client import BoatraceClient
 from kyotei.scraper.odds import parse_odds3t_html
 from kyotei.scraper.racelist import parse_racelist_html
 from kyotei.scraper.racerform import parse_racer_back3_html
-from kyotei.storage import BacktestOutcome, BacktestStore
+from kyotei.storage import (
+    FAVORITE_RACER,
+    FAVORITE_VENUE,
+    BacktestOutcome,
+    BacktestStore,
+    FavoriteStore,
+    OddsSnapshotStore,
+    PredictionLogStore,
+)
 
 
 def _fetch_recent_form(client: BoatraceClient, racer_id: int) -> RecentForm | None:
@@ -59,8 +72,11 @@ def _format_prediction(
     odds_list: list[TrifectaOdds] | None,
     budget: int | None,
     recent_forms: dict[int, RecentForm | None] | None = None,
+    odds_history: list[dict] | None = None,
+    favorite_racer_ids: set[int] | None = None,
 ) -> str:
     race = prediction.race
+    favorite_racer_ids = favorite_racer_ids or set()
     lines = [
         f"{race.venue_name}（{race.venue_code}） {race.date} {race.race_number}R 予想",
         "※ 統計的な参考情報であり、的中・回収を保証するものではありません。舟券の購入判断はご自身で。",
@@ -69,7 +85,13 @@ def _format_prediction(
         f"{'枠':<3}{'選手名':<12}{'推定勝率':>10}",
     ]
     for p in prediction.as_rank_list():
-        lines.append(f"{p.lane:<3}{p.racer_name:<12}{p.win_probability * 100:>9.1f}%")
+        star = "★" if race.entry(p.lane).racer_id in favorite_racer_ids else ""
+        lines.append(f"{p.lane:<3}{p.racer_name + star:<12}{p.win_probability * 100:>9.1f}%")
+
+    lines.append("")
+    lines.append("[予想根拠]")
+    for p in prediction.as_rank_list():
+        lines.append(f"{p.lane}  {p.racer_name}: {p.rationale_summary}")
 
     lines.append("")
     lines.append("[選手情報]")
@@ -149,6 +171,17 @@ def _format_prediction(
                 total += a.amount
             lines.append(f"  合計: {total}円（予算との差額 {budget - total}円は未配分）")
 
+    if odds_history:
+        by_combo: dict[str, list[dict]] = {}
+        for h in odds_history:
+            by_combo.setdefault(h["combo"], []).append(h)
+        if any(len(v) >= 2 for v in by_combo.values()):
+            lines.append("")
+            lines.append("[オッズの推移（本命上位3点、このレースをこのアプリで見るたびに記録）]")
+            for combo, points in by_combo.items():
+                series = " → ".join(f"{p['odds']:.1f}倍" for p in points)
+                lines.append(f"  {combo:<10}{series}")
+
     if before_info is not None:
         lines.append("")
         if before_info.exhibitions:
@@ -219,9 +252,31 @@ def cmd_predict(args: argparse.Namespace) -> int:
         recent_forms = {
             e.racer_id: _fetch_recent_form(client, e.racer_id) for e in race.entries
         }
+
+    PredictionLogStore().log(prediction)
+
+    odds_snapshots = OddsSnapshotStore()
+    if odds_list:
+        odds_map = {o.lanes: o.odds for o in odds_list}
+        top3 = trifecta_candidates(prediction.predictions, top_n=3)
+        entries = [(t.label, odds_map[t.lanes]) for t in top3 if t.lanes in odds_map]
+        odds_snapshots.record(code, args.date, args.race, entries)
+    odds_history = odds_snapshots.history(code, args.date, args.race)
+
+    favorite_racer_ids = {
+        int(f["key"]) for f in FavoriteStore().list(kind=FAVORITE_RACER)
+    }
+
     print(
         _format_prediction(
-            client, prediction, before_info, odds_list, args.budget, recent_forms
+            client,
+            prediction,
+            before_info,
+            odds_list,
+            args.budget,
+            recent_forms,
+            odds_history,
+            favorite_racer_ids,
         )
     )
     return 0
@@ -298,7 +353,15 @@ def cmd_backtest_day(args: argparse.Namespace) -> int:
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
-    if args.venues.strip().lower() == "all":
+    if args.favorites_only:
+        codes = [venue_code(f["key"]) for f in FavoriteStore().list(kind=FAVORITE_VENUE)]
+        if not codes:
+            print("お気に入り登録された競艇場がありません（`kyotei favorite add-venue` で登録してください）。")
+            return 0
+    elif args.venues is None:
+        print("エラー: --venues か --favorites-only のどちらかを指定してください。", file=sys.stderr)
+        return 1
+    elif args.venues.strip().lower() == "all":
         codes = list(VENUES.keys())
     else:
         codes = [venue_code(v.strip()) for v in args.venues.split(",") if v.strip()]
@@ -344,6 +407,115 @@ def cmd_stats(args: argparse.Namespace) -> int:
     print("[回収率（毎レース100円ずつ本命1点賭けした場合の試算。100%＝収支トントン）]")
     print(f"単勝: {stats['tansho_roi'] * 100:.1f}%")
     print(f"3連単: {stats['trifecta_roi'] * 100:.1f}%")
+    return 0
+
+
+def cmd_patterns(args: argparse.Namespace) -> int:
+    store = BacktestStore()
+    by_venue = store.stats_by_venue(date_from=args.date_from, date_to=args.date_to)
+    if not by_venue:
+        print("該当するbacktestデータがありません。先に `kyotei backtest` / `kyotei backtest-day` を実行してください。")
+        return 0
+
+    print("[場ごとの的中率・回収率（勝ちパターン分析）]")
+    for r in sorted(by_venue, key=lambda x: x["top1_rate"], reverse=True):
+        print(
+            f"{r['venue_name']:<6} 件数{r['count']:>4}件  "
+            f"単勝的中率{r['top1_rate'] * 100:>5.1f}%  "
+            f"単勝回収率{r['tansho_roi'] * 100:>6.1f}%  "
+            f"3連単回収率{r['trifecta_roi'] * 100:>6.1f}%"
+        )
+
+    print()
+    print("[推定勝率帯ごとの実際の的中率（モデルの自信度は信頼できるか）]")
+    by_confidence = store.stats_by_confidence(date_from=args.date_from, date_to=args.date_to)
+    for r in by_confidence:
+        if r["count"] == 0:
+            continue
+        print(
+            f"予想1位の推定勝率 {r['bucket']:<8} 件数{r['count']:>4}件  "
+            f"実際の的中率{r['top1_rate'] * 100:>5.1f}%  単勝回収率{r['tansho_roi'] * 100:>6.1f}%"
+        )
+    print("※ 推定勝率帯が上がるほど実際の的中率も上がっていれば、モデルの確率の付け方は妥当と判断できる目安。")
+    return 0
+
+
+def cmd_favorite_add_racer(args: argparse.Namespace) -> int:
+    label = args.label or f"選手{args.racer_id}"
+    FavoriteStore().add(FAVORITE_RACER, str(args.racer_id), label)
+    print(f"お気に入り選手に追加しました: {label}（登録番号{args.racer_id}）")
+    return 0
+
+
+def cmd_favorite_add_venue(args: argparse.Namespace) -> int:
+    code = venue_code(args.venue)
+    FavoriteStore().add(FAVORITE_VENUE, code, VENUES.get(code, code))
+    print(f"お気に入り競艇場に追加しました: {VENUES.get(code, code)}")
+    return 0
+
+
+def cmd_favorite_remove_racer(args: argparse.Namespace) -> int:
+    FavoriteStore().remove(FAVORITE_RACER, str(args.racer_id))
+    print(f"お気に入り選手から削除しました: 登録番号{args.racer_id}")
+    return 0
+
+
+def cmd_favorite_remove_venue(args: argparse.Namespace) -> int:
+    code = venue_code(args.venue)
+    FavoriteStore().remove(FAVORITE_VENUE, code)
+    print(f"お気に入り競艇場から削除しました: {VENUES.get(code, code)}")
+    return 0
+
+
+def cmd_favorite_list(_args: argparse.Namespace) -> int:
+    store = FavoriteStore()
+    racers = store.list(kind=FAVORITE_RACER)
+    venues = store.list(kind=FAVORITE_VENUE)
+    print("[お気に入り選手]")
+    if not racers:
+        print("（登録なし）")
+    for f in racers:
+        print(f"  {f['label']}（登録番号{f['key']}）: {racer_profile_url(int(f['key']))}")
+    print()
+    print("[お気に入り競艇場]")
+    if not venues:
+        print("（登録なし）")
+    for f in venues:
+        print(f"  {f['label']}")
+    return 0
+
+
+def cmd_today(args: argparse.Namespace) -> int:
+    client = BoatraceClient(use_cache=not args.no_cache)
+    log_store = PredictionLogStore()
+    rows = list(compare_logged_predictions(client, log_store, args.date))
+    if not rows:
+        print(f"{args.date} 分の予想ログがありません（`kyotei predict` で予想を見るとログされます）。")
+        return 0
+
+    resolved = [r for r in rows if r["status"] == "resolved"]
+    unresolved = [r for r in rows if r["status"] != "resolved"]
+
+    print(f"[{args.date} に見た予想の振り返り]")
+    for r in resolved:
+        mark = "◎的中" if r["top1_hit"] else "✕"
+        prob_text = (
+            f"（推定勝率{r['predicted_top_probability'] * 100:.1f}%）"
+            if r["predicted_top_probability"] is not None
+            else ""
+        )
+        print(
+            f"{r['venue_name']} {r['race_number']}R: "
+            f"予想1位={r['predicted_top_lane']}号艇{prob_text} / "
+            f"実際1着={r['actual_winner_lane']}号艇 {mark}"
+        )
+    if resolved:
+        hit = sum(1 for r in resolved if r["top1_hit"])
+        print(f"\n確定分 的中率: {hit}/{len(resolved)}件 ({hit / len(resolved) * 100:.1f}%)")
+    if unresolved:
+        print(f"\n未確定（開催前・進行中）: {len(unresolved)}件")
+        for r in unresolved:
+            print(f"  {r['venue_name']} {r['race_number']}R")
     return 0
 
 
@@ -401,8 +573,14 @@ def build_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument("--date", required=True, help="開催日 YYYYMMDD")
     scan_parser.add_argument(
         "--venues",
-        required=True,
-        help="場名/場コードのカンマ区切り（例: 桐生,唐津）。全24場対象なら 'all' を指定",
+        default=None,
+        help="場名/場コードのカンマ区切り（例: 桐生,唐津）。全24場対象なら 'all' を指定。"
+        "--favorites-only と併用不可",
+    )
+    scan_parser.add_argument(
+        "--favorites-only",
+        action="store_true",
+        help="お気に入り登録した競艇場のみを対象にする（`kyotei favorite add-venue` で登録）",
     )
     scan_parser.add_argument(
         "--races", default="1-12", help="レース番号（例: 1-12 や 1,3,5）。デフォルト全レース"
@@ -422,6 +600,43 @@ def build_parser() -> argparse.ArgumentParser:
     stats_parser.add_argument("--from", dest="date_from", default=None, help="開始日 YYYYMMDD")
     stats_parser.add_argument("--to", dest="date_to", default=None, help="終了日 YYYYMMDD")
     stats_parser.set_defaults(func=cmd_stats)
+
+    patterns_parser = subparsers.add_parser(
+        "patterns", help="場ごと・自信度ごとの的中率を集計し、勝ちパターンを分析する"
+    )
+    patterns_parser.add_argument("--from", dest="date_from", default=None, help="開始日 YYYYMMDD")
+    patterns_parser.add_argument("--to", dest="date_to", default=None, help="終了日 YYYYMMDD")
+    patterns_parser.set_defaults(func=cmd_patterns)
+
+    favorite_parser = subparsers.add_parser("favorite", help="お気に入り選手・競艇場を管理する")
+    favorite_subparsers = favorite_parser.add_subparsers(dest="favorite_command", required=True)
+
+    fav_add_racer = favorite_subparsers.add_parser("add-racer", help="お気に入り選手を追加する")
+    fav_add_racer.add_argument("racer_id", type=int, help="選手登録番号")
+    fav_add_racer.add_argument("--label", default=None, help="表示名（省略時は「選手{番号}」）")
+    fav_add_racer.set_defaults(func=cmd_favorite_add_racer)
+
+    fav_add_venue = favorite_subparsers.add_parser("add-venue", help="お気に入り競艇場を追加する")
+    fav_add_venue.add_argument("venue", help="競艇場名 または 場コード")
+    fav_add_venue.set_defaults(func=cmd_favorite_add_venue)
+
+    fav_remove_racer = favorite_subparsers.add_parser("remove-racer", help="お気に入り選手を削除する")
+    fav_remove_racer.add_argument("racer_id", type=int, help="選手登録番号")
+    fav_remove_racer.set_defaults(func=cmd_favorite_remove_racer)
+
+    fav_remove_venue = favorite_subparsers.add_parser("remove-venue", help="お気に入り競艇場を削除する")
+    fav_remove_venue.add_argument("venue", help="競艇場名 または 場コード")
+    fav_remove_venue.set_defaults(func=cmd_favorite_remove_venue)
+
+    fav_list = favorite_subparsers.add_parser("list", help="お気に入り一覧を表示する")
+    fav_list.set_defaults(func=cmd_favorite_list)
+
+    today_parser = subparsers.add_parser(
+        "today", help="`predict`で実際に見た予想を、確定結果と突き合わせて振り返る"
+    )
+    today_parser.add_argument("--date", required=True, help="対象日 YYYYMMDD")
+    today_parser.add_argument("--no-cache", action="store_true")
+    today_parser.set_defaults(func=cmd_today)
 
     return parser
 

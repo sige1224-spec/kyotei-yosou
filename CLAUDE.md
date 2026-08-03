@@ -23,11 +23,15 @@ src/kyotei/
   constants.py        # 全24競艇場の場コード・場名、コース別1着率の目安
   cli.py               # CLIエントリポイント（`kyotei` コマンド）
   backtest.py          # backtest実行ロジック（CLI・Web共通）
-  storage.py           # backtest結果（的中率・回収率）を蓄積するSQLiteストア（data/kyotei.db）
+  storage.py           # backtest結果・お気に入り・オッズ推移・予想ログを蓄積するSQLite
+                        # ストア群（data/kyotei.db）。BacktestStore/FavoriteStore/
+                        # OddsSnapshotStore/PredictionLogStore
+  predictionlog.py     # PredictionLogStoreの記録を確定結果と突き合わせる（当日振り返り用）
   dayview.py            # 同一開催日・同一会場の他レース結果をまとめて取得
   models/
-    entities.py        # RaceCard, RacerEntry, BeforeInfo, RaceResult, Payout, TrifectaOdds 等
-    predictor.py        # 統計・ルールベースの予想ロジック
+    entities.py        # RaceCard, RacerEntry, BeforeInfo, RaceResult, Payout, TrifectaOdds,
+                        # RationaleFactor 等
+    predictor.py        # 統計・ルールベースの予想ロジック＋予想根拠（rationale）の生成
     combos.py            # 推定勝率から買い目候補（3連単/2連単/3連複）をHarville近似で算出
     genres.py             # 買い目候補を本命/中穴/大穴に分類（推定確率×オッズ）
     allocation.py          # 予算を推定確率に比例して100円単位で配分
@@ -41,25 +45,33 @@ src/kyotei/
     odds.py               # 3連単オッズページのパーサー
     racerform.py           # 選手プロフィール「過去3節成績」ページのパーサー（直近の着順トレンド）
 web/
-  app.py               # Streamlitダッシュボード（レース予想 / 検証ダッシュボード）
+  app.py               # Streamlitダッシュボード（レース予想 / 狙い目スキャン / 勝ちパターン分析 /
+                        # お気に入り管理 / 今日の予想ログ / 検証ダッシュボード の6画面構成）
 scripts/
   collect_history.py    # 過去複数日・全会場のbacktestをまとめて実行しデータ蓄積
   tune_weights.py        # キャッシュ済みHTMLのみでネットワーク不要の重み検証・ランダムサーチ
+                          # （--with-recent-formで直近成績weightのablationも実行可）
 tests/
   fixtures/             # 保存済みサンプルHTML（パーサーの単体テスト用）
 data/
   cache/                # 取得したHTMLのローカルキャッシュ（gitignore対象）
-  kyotei.db             # backtest結果のSQLite DB（gitignore対象、ローカル蓄積データ）
+  kyotei.db             # backtest結果・お気に入り・オッズ推移・予想ログのSQLite DB
+                         # （gitignore対象から明示的に除外し、git管理下に置いている）
 ```
 
 ## 使い方
 ```powershell
 kyotei venues                                              # 場コード一覧
-kyotei predict --venue 桐生 --date 20260802 --race 1         # 予想・買い目候補・選手情報を表示
+kyotei predict --venue 桐生 --date 20260802 --race 1         # 予想・予想根拠・買い目候補・選手情報を表示
 kyotei backtest --venue 桐生 --date 20260731 --race 1         # 過去レース1件を答え合わせ
 kyotei backtest-day --date 20260731 --venues all --races 1-12  # 指定日をまとめて答え合わせ
 kyotei scan --date 20260802 --venues all --races 1-12 --genre 大穴  # 複数場・複数レース横断で狙い目候補を探す
 kyotei stats                                                # 蓄積した的中率・回収率を表示
+kyotei patterns                                             # 場ごと・自信度ごとの的中率を分析（勝ちパターン分析）
+kyotei favorite add-racer 4300 --label 加藤綾                 # お気に入り選手を登録
+kyotei favorite add-venue 桐生                                # お気に入り競艇場を登録
+kyotei favorite list                                        # お気に入り一覧
+kyotei today --date 20260802                                 # 今日見た予想を確定結果と突き合わせて振り返る
 streamlit run web/app.py                                    # Webダッシュボード起動（ローカル）
 python -m pytest                                            # テスト実行
 ```
@@ -83,7 +95,10 @@ python -m pytest                                            # テスト実行
   `git add data/kyotei.db && git commit && git push` でコミットしないとスマホ側
   （Streamlit Cloud）の検証ダッシュボードには反映されない**（自動同期ではなく手動push時点の
   スナップショット）。DBサイズは2026-08-02時点で483レース分で約160KB。1万レース分でも
-  数MB程度の見込みでgit管理上の問題は当面ない。
+  数MB程度の見込みでgit管理上の問題は当面ない。同じDBファイルに
+  `favorites`（お気に入り選手/競艇場）・`odds_snapshots`（オッズ推移記録）・
+  `prediction_log`（予想ログ）のテーブルも同居している（2026-08-03追加、いずれも
+  BacktestStoreとは独立したクラス）。
 
 ## 開発方針・注意点
 - データ取得: boatrace.jp をスクレイピング（robots.txtで全面許可を確認済み）。
@@ -104,7 +119,18 @@ python -m pytest                                            # テスト実行
   同様に表示のみで予想スコアには未反映（2026-08-02追加。backtestでの効果検証を行っておらず、
   安易に重みへ組み込むと過学習のリスクがあるため）。`kyotei predict`は選手6人分を毎回追加
   取得するため`--no-recent-form`で省略可、Webは「直近成績（過去3節）も取得する」チェックボックスで
-  制御。
+  制御。2026-08-03、`PredictorWeights.recent_form_weight`（既定値0）としてスコアに
+  加味する経路自体は実装済み（`predict_race`に`recent_forms`を渡すと有効化）。
+  `scripts/tune_weights.py --with-recent-form`でオフライン検証できるが（初回のみ
+  未キャッシュ選手分のネットワークアクセスが発生）、まだ実データでの検証を行っていないため
+  既定値0のまま。動かす場合は必ずbaseline比で明確な改善を確認してから。
+- 予想根拠（`predictor.py`の`_build_rationale`、`LanePrediction.rationale_summary`/
+  `rationale_factors`）は2026-08-03追加。各要素（コース取り・全国勝率・当地勝率・
+  モーター2連率・ボート2連率・平均ST・展示タイム・F数）について6艇中の順位を算出し、
+  「他艇と比べて何が強み/弱みか」を文章化する。`_normalize_to_shares`によるスコア合成が
+  非線形（負値シフト＋正規化）なため、各要素の寄与度を厳密に数値分解するのはミスリーディング
+  になると判断し、あえて絶対値ではなく相対順位ベースの説明にしている。CLI/Webの両方で
+  「予想根拠」として表示。
 - 買い目候補（`combos.py`）はHarvilleの公式（1973年、競馬で提案された手法）で推定勝率から
   着順の組み合わせ確率を近似したもの。艇どうしの展開上の相関は捉えられない単純化である旨を
   明記している。
@@ -127,19 +153,38 @@ python -m pytest                                            # テスト実行
   単勝回収率86.0%、3連単的中率5.8%、3連単回収率81.7%）。
 - Webダッシュボードのグラフはdatavizスキルの検証済みカテゴリカルパレット
   （`web/app.py` の `CATEGORICAL_PALETTE`）を使用。枠番の色は固定順で割り当てている。
+- お気に入り（`FavoriteStore`、2026-08-03追加）は選手（`kind="racer"`, `key=登録番号`）と
+  競艇場（`kind="venue"`, `key=場コード`）の2種類。Webの「レース予想」ページで選手は
+  多選択欄、競艇場はサイドバーのチェックボックスから登録・解除する。`kyotei scan
+  --favorites-only` / Webの「狙い目スキャン」ページのチェックボックスで、お気に入り
+  競艇場だけに絞って横断スキャンできる。
+- オッズの推移（`OddsSnapshotStore`、2026-08-03追加）は、そのレースを予想画面で開く
+  （＝実際にオッズを取得する）たびに、本命上位3点の3連単オッズを記録する。バックグラウンドで
+  定期取得する仕組みは無い（サーバー常駐の仕組みがないため）ので、記録間隔は「利用者が
+  そのレースを見た頻度」に依存し不定期。2回以上記録があるレースだけ推移グラフ/一覧を表示する。
+- 予想ログ・当日振り返り（`PredictionLogStore`/`predictionlog.py`、2026-08-03追加）は、
+  `kyotei predict`・Webの予想画面で実際に見た予想を`prediction_log`テーブルに記録し
+  （同一レースは最新の予想で上書き）、`kyotei today --date`・Webの「今日の予想ログ」
+  ページで結果確定後に答え合わせする。`backtest`系（出走表データの時点で改めて予想し
+  直す検証用）とは目的が異なり、「その時実際に何を見ていたか」をそのまま記録する点が違う。
 
 ## 現状・今後
 - 出走表・直前情報・結果（払戻金含む）・3連単オッズ・選手の直近成績（過去3節）の取得/パース、
-  統計・ルールベース予想、買い目候補算出（本命/中穴/大穴ジャンル分け）、予算配分、同日他レース
-  結果表示、複数場・複数レース横断の狙い目スキャン（`scan.py`）、選手プロフィールリンク、
-  CLI（predict/backtest/backtest-day/scan/stats）、Streamlitダッシュボード（予想画面・
-  狙い目スキャン画面・検証画面）まで実装済み。全24場での動作確認済み。GitHub連携で
-  Streamlit Community Cloudにデプロイし、iPhone等からアクセス可能な状態。backtestデータ
-  （`data/kyotei.db`）もgit管理下に置き、ローカルで蓄積したデータをpushすればスマホ側にも
+  統計・ルールベース予想＋予想根拠の文章化、買い目候補算出（本命/中穴/大穴ジャンル分け）、
+  予算配分、同日他レース結果表示、複数場・複数レース横断の狙い目スキャン（`scan.py`、
+  お気に入り競艇場での絞り込み対応）、勝ちパターン分析（場ごと/自信度ごとの的中率）、
+  お気に入り選手・競艇場管理、オッズ推移記録、当日予想ログの振り返り、選手プロフィール
+  リンク、CLI（predict/backtest/backtest-day/scan/stats/patterns/favorite/today）、
+  Streamlitダッシュボード（レース予想・狙い目スキャン・勝ちパターン分析・お気に入り管理・
+  今日の予想ログ・検証ダッシュボードの6画面）まで実装済み。全24場での動作確認済み。
+  GitHub連携でStreamlit Community Cloudにデプロイし、iPhone等からアクセス可能な状態。
+  backtestデータ・お気に入り・オッズ推移・予想ログはいずれも同じ`data/kyotei.db`に
+  同居しgit管理下に置いているため、ローカルで蓄積したデータをpushすればスマホ側にも
   反映される。
 - `scripts/collect_history.py`（過去日をまとめてbacktest・データ蓄積）と
   `scripts/tune_weights.py`（キャッシュ済みHTMLのみでネットワーク不要の重み検証・
-  ランダムサーチ）も実装済み。一度データを蓄積すれば、以降の重み検証はネット
-  アクセスなしで何度でも試せる。
-- 未着手: より多くの日数・場でのデータ蓄積による重みの再検証、天候の予想ロジックへの
-  反映要否の検討、機械学習モデルへの置き換え。
+  ランダムサーチ。`--with-recent-form`で直近成績weightのablationも可能）も実装済み。
+  一度データを蓄積すれば、以降の重み検証はネットアクセスなしで何度でも試せる。
+- 未着手: より多くの日数・場でのデータ蓄積による重みの再検証、`recent_form_weight`の
+  実データでの検証（現状0のまま）、天候の予想ロジックへの反映要否の検討、機械学習モデルへの
+  置き換え。

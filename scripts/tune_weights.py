@@ -9,9 +9,11 @@ PredictorWeights の妥当性を検証・探索するオフラインツール。
 
 使い方:
     python scripts/tune_weights.py
+    python scripts/tune_weights.py --with-recent-form  # 直近成績weightのablationも実行（初回はネットワークアクセスあり）
 """
 from __future__ import annotations
 
+import argparse
 import random
 import sys
 from dataclasses import asdict, replace
@@ -20,10 +22,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from kyotei.backtest import collect_raw_race_ids
+from kyotei.models.entities import RecentForm
 from kyotei.models.predictor import DEFAULT_WEIGHTS, PredictorWeights, predict_race
 from kyotei.scraper.beforeinfo import parse_beforeinfo_html
 from kyotei.scraper.client import BoatraceClient
 from kyotei.scraper.racelist import parse_racelist_html
+from kyotei.scraper.racerform import parse_racer_back3_html
 from kyotei.scraper.result import parse_raceresult_html
 from kyotei.storage import evaluate_prediction
 
@@ -56,13 +60,44 @@ def load_dataset(client: BoatraceClient) -> list[tuple]:
     return dataset
 
 
-def evaluate(dataset: list[tuple], weights: PredictorWeights) -> dict:
+def load_recent_forms(client: BoatraceClient, dataset: list[tuple]) -> dict[int, RecentForm]:
+    """データセットに登場する全選手の直近成績（過去3節）をまとめて取得する。
+
+    `client`の通常のレート制限・キャッシュ機構をそのまま使うため、初回のみ
+    未キャッシュの選手分だけネットワークアクセスが発生する（`data/cache/back3_*.html`
+    に保存されるため、2回目以降は完全にオフラインで再評価できる）。
+    """
+    racer_ids = {e.racer_id for race, _before, _result in dataset for e in race.entries}
+    forms: dict[int, RecentForm] = {}
+    for i, racer_id in enumerate(sorted(racer_ids), start=1):
+        try:
+            html = client.get_racer_back3_html(racer_id)
+            forms[racer_id] = parse_racer_back3_html(html, racer_id)
+        except Exception:
+            continue
+        if i % 20 == 0:
+            print(f"  直近成績取得中... {i}/{len(racer_ids)}人")
+    return forms
+
+
+def evaluate(
+    dataset: list[tuple],
+    weights: PredictorWeights,
+    recent_forms: dict[int, RecentForm] | None = None,
+) -> dict:
     n = top1 = top2 = top3 = 0
     per_race_top1: dict[tuple[str, str, int], bool] = {}
     for race, before_info, result in dataset:
         if result.winner_lane() is None:
             continue
-        prediction = predict_race(race, before_info=before_info, weights=weights)
+        race_recent_forms = (
+            {e.racer_id: recent_forms[e.racer_id] for e in race.entries if e.racer_id in recent_forms}
+            if recent_forms
+            else None
+        )
+        prediction = predict_race(
+            race, before_info=before_info, weights=weights, recent_forms=race_recent_forms
+        )
         outcome = evaluate_prediction(prediction, result)
         n += 1
         top1 += outcome.top1_hit
@@ -132,6 +167,15 @@ def random_search(
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--with-recent-form",
+        action="store_true",
+        help="選手の直近成績（過去3節）weightのablationも実行する。"
+        "未キャッシュの選手分は初回のみネットワークアクセスが発生する",
+    )
+    args = parser.parse_args()
+
     client = BoatraceClient(use_cache=True)
     dataset = load_dataset(client)
     print(f"読み込んだキャッシュ済みレース件数: {len(dataset)}")
@@ -158,6 +202,21 @@ def main() -> None:
     for i, (weights, result) in enumerate(top5, start=1):
         print(f"[{i}] {format_result('candidate', result, base=baseline)}")
         print(f"     weights={asdict(weights)}")
+
+    if args.with_recent_form:
+        print()
+        print("=== 直近成績（過去3節）weight ablation ===")
+        print("選手の直近成績を取得中（未キャッシュ分のみネットワークアクセス）...")
+        recent_forms = load_recent_forms(client, dataset)
+        print(f"取得できた選手数: {len(recent_forms)}")
+        for label, w_value in [("0.05", 0.05), ("0.10", 0.10), ("0.20", 0.20)]:
+            w = replace(DEFAULT_WEIGHTS, recent_form_weight=w_value)
+            result = evaluate(dataset, w, recent_forms=recent_forms)
+            print(format_result(f"recent_form_weight={label}", result, base=baseline))
+        print(
+            "※ このデータ量での参考結果。baseline比で明確かつ一貫した改善が見えない限り、"
+            "PredictorWeights.recent_form_weightの既定値(0)は動かさないこと。"
+        )
 
 
 if __name__ == "__main__":

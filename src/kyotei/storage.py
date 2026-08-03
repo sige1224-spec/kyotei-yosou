@@ -282,3 +282,282 @@ class BacktestStore:
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def stats_by_venue(
+        self, date_from: str | None = None, date_to: str | None = None
+    ) -> list[dict]:
+        """場ごとの的中率・回収率（どの場で予想精度が良い/悪いかを見る「勝ちパターン分析」用）。"""
+        query = (
+            "SELECT venue_code, venue_name, "
+            "SUM(top1_hit) AS top1, SUM(top2_hit) AS top2, SUM(top3_hit) AS top3, "
+            "SUM(tansho_payout) AS tansho_total, SUM(trifecta_top1_payout) AS trifecta_total, "
+            "COUNT(*) AS count "
+            "FROM backtests WHERE 1=1"
+        )
+        params: list[str] = []
+        if date_from:
+            query += " AND date >= ?"
+            params.append(date_from)
+        if date_to:
+            query += " AND date <= ?"
+            params.append(date_to)
+        query += " GROUP BY venue_code, venue_name ORDER BY count DESC"
+
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        return [
+            {
+                "venue_code": r[0],
+                "venue_name": r[1],
+                "count": r[7],
+                "top1_rate": r[2] / r[7],
+                "top2_rate": r[3] / r[7],
+                "top3_rate": r[4] / r[7],
+                "tansho_roi": r[5] / (r[7] * 100),
+                "trifecta_roi": r[6] / (r[7] * 100),
+            }
+            for r in rows
+        ]
+
+    def stats_by_confidence(
+        self,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        buckets: list[tuple[float, float, str]] | None = None,
+    ) -> list[dict]:
+        """予想1位レーンの推定勝率帯ごとに、実際の的中率・回収率を集計する。
+
+        モデルが「自信を持っている」（推定勝率が高い）レースほど実際に当たって
+        いるかを確認するための「勝ちパターン分析」。推定勝率とヒット率がおおむね
+        比例していれば、モデルの確率の付け方自体は大きく歪んでいないと判断できる。
+        """
+        buckets = buckets or [
+            (0.0, 0.30, "30%未満"),
+            (0.30, 0.40, "30〜40%"),
+            (0.40, 0.50, "40〜50%"),
+            (0.50, 1.01, "50%以上"),
+        ]
+        query = (
+            "SELECT predicted_ranking, win_probabilities, top1_hit, tansho_payout "
+            "FROM backtests WHERE 1=1"
+        )
+        params: list[str] = []
+        if date_from:
+            query += " AND date >= ?"
+            params.append(date_from)
+        if date_to:
+            query += " AND date <= ?"
+            params.append(date_to)
+
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        agg = {label: {"count": 0, "top1": 0, "payout": 0} for _, _, label in buckets}
+        for predicted_ranking_json, win_probabilities_json, top1_hit, payout in rows:
+            predicted_ranking = json.loads(predicted_ranking_json)
+            win_probabilities = json.loads(win_probabilities_json)
+            if not predicted_ranking:
+                continue
+            prob = win_probabilities.get(str(predicted_ranking[0]))
+            if prob is None:
+                continue
+            for lo, hi, label in buckets:
+                if lo <= prob < hi:
+                    agg[label]["count"] += 1
+                    agg[label]["top1"] += top1_hit
+                    agg[label]["payout"] += payout
+                    break
+
+        result = []
+        for _lo, _hi, label in buckets:
+            a = agg[label]
+            count = a["count"]
+            result.append(
+                {
+                    "bucket": label,
+                    "count": count,
+                    "top1_rate": (a["top1"] / count) if count else 0.0,
+                    "tansho_roi": (a["payout"] / (count * 100)) if count else 0.0,
+                }
+            )
+        return result
+
+
+_FAVORITES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS favorites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    label TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(kind, key)
+);
+"""
+
+FAVORITE_RACER = "racer"
+FAVORITE_VENUE = "venue"
+
+
+class FavoriteStore:
+    """お気に入り選手・お気に入り競艇場を `data/kyotei.db` に永続化するリポジトリ。"""
+
+    def __init__(self, db_path: Path | str = DEFAULT_DB_PATH) -> None:
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.executescript(_FAVORITES_SCHEMA)
+            conn.commit()
+
+    def add(self, kind: str, key: str, label: str) -> None:
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "INSERT INTO favorites (kind, key, label, created_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(kind, key) DO UPDATE SET label=excluded.label",
+                (kind, key, label, datetime.now(timezone.utc).isoformat()),
+            )
+            conn.commit()
+
+    def remove(self, kind: str, key: str) -> None:
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute("DELETE FROM favorites WHERE kind = ? AND key = ?", (kind, key))
+            conn.commit()
+
+    def list(self, kind: str | None = None) -> list[dict]:
+        query = "SELECT kind, key, label, created_at FROM favorites WHERE 1=1"
+        params: list[str] = []
+        if kind:
+            query += " AND kind = ?"
+            params.append(kind)
+        query += " ORDER BY created_at DESC"
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [{"kind": r[0], "key": r[1], "label": r[2], "created_at": r[3]} for r in rows]
+
+    def is_favorite(self, kind: str, key: str) -> bool:
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM favorites WHERE kind = ? AND key = ?", (kind, str(key))
+            ).fetchone()
+        return row is not None
+
+
+_ODDS_SNAPSHOT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS odds_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue_code TEXT NOT NULL,
+    date TEXT NOT NULL,
+    race_number INTEGER NOT NULL,
+    captured_at TEXT NOT NULL,
+    combo TEXT NOT NULL,
+    odds REAL NOT NULL
+);
+"""
+
+
+class OddsSnapshotStore:
+    """3連単オッズを取得するたびに記録し、直前までのオッズの推移を追えるようにする。
+
+    バックグラウンドでの定期取得は行わない（サーバー常駐の仕組みがないため）。
+    利用者がそのレースを予想画面で複数回開いたタイミングでのみ記録が増える、
+    間隔が不定期な「その場しのぎ」の記録である点に注意。
+    """
+
+    def __init__(self, db_path: Path | str = DEFAULT_DB_PATH) -> None:
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.executescript(_ODDS_SNAPSHOT_SCHEMA)
+            conn.commit()
+
+    def record(
+        self, venue_code: str, date: str, race_number: int, entries: list[tuple[str, float]]
+    ) -> None:
+        if not entries:
+            return
+        captured_at = datetime.now(timezone.utc).isoformat()
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.executemany(
+                "INSERT INTO odds_snapshots "
+                "(venue_code, date, race_number, captured_at, combo, odds) VALUES (?, ?, ?, ?, ?, ?)",
+                [(venue_code, date, race_number, captured_at, label, odds) for label, odds in entries],
+            )
+            conn.commit()
+
+    def history(self, venue_code: str, date: str, race_number: int) -> list[dict]:
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT captured_at, combo, odds FROM odds_snapshots "
+                "WHERE venue_code = ? AND date = ? AND race_number = ? "
+                "ORDER BY captured_at",
+                (venue_code, date, race_number),
+            ).fetchall()
+        return [{"captured_at": r[0], "combo": r[1], "odds": r[2]} for r in rows]
+
+
+_PREDICTION_LOG_SCHEMA = """
+CREATE TABLE IF NOT EXISTS prediction_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue_code TEXT NOT NULL,
+    venue_name TEXT NOT NULL,
+    date TEXT NOT NULL,
+    race_number INTEGER NOT NULL,
+    logged_at TEXT NOT NULL,
+    predicted_ranking TEXT NOT NULL,
+    win_probabilities TEXT NOT NULL,
+    UNIQUE(venue_code, date, race_number)
+);
+"""
+
+
+class PredictionLogStore:
+    """`kyotei predict` / Webの予想画面で実際に見た予想を記録するリポジトリ。
+
+    同一レースを複数回見た場合は最新の予想で上書きする（同日結果比較ビュー用に
+    「その日その時点で何を見ていたか」の記録が目的で、backtestとは別物）。
+    """
+
+    def __init__(self, db_path: Path | str = DEFAULT_DB_PATH) -> None:
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.executescript(_PREDICTION_LOG_SCHEMA)
+            conn.commit()
+
+    def log(self, prediction: RacePrediction) -> None:
+        ranked = prediction.as_rank_list()
+        predicted_ranking = [p.lane for p in ranked]
+        win_probabilities = {p.lane: p.win_probability for p in ranked}
+        race = prediction.race
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                """
+                INSERT INTO prediction_log (
+                    venue_code, venue_name, date, race_number, logged_at,
+                    predicted_ranking, win_probabilities
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(venue_code, date, race_number) DO UPDATE SET
+                    logged_at=excluded.logged_at,
+                    predicted_ranking=excluded.predicted_ranking,
+                    win_probabilities=excluded.win_probabilities
+                """,
+                (
+                    race.venue_code,
+                    race.venue_name,
+                    race.date,
+                    race.race_number,
+                    datetime.now(timezone.utc).isoformat(),
+                    json.dumps(predicted_ranking),
+                    json.dumps(win_probabilities),
+                ),
+            )
+            conn.commit()
+
+    def for_date(self, date: str) -> list[dict]:
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM prediction_log WHERE date = ? ORDER BY race_number ASC, venue_name ASC",
+                (date,),
+            ).fetchall()
+        return [dict(r) for r in rows]

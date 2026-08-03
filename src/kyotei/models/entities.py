@@ -177,6 +177,15 @@ class RecentForm:
 
 
 @dataclass
+class RationaleFactor:
+    """予想根拠の1要素（レーン1つぶん）。"""
+
+    label: str  # 例: "全国勝率"
+    detail: str  # 例: "6.80（6艇中1位）" のような具体的な数値付き説明
+    favorable: bool | None  # True=このレーンにとって有利な要素 / False=不利な要素 / None=中立（参考情報）
+
+
+@dataclass
 class LanePrediction:
     """レーン単位の予想スコア。"""
 
@@ -184,6 +193,8 @@ class LanePrediction:
     racer_name: str
     score: float
     win_probability: float  # 正規化後の推定1着確率 (0-1)
+    rationale_summary: str = ""  # 一言でまとめた予想根拠の文章
+    rationale_factors: list[RationaleFactor] = field(default_factory=list)  # 重み順の要素一覧
 
 
 @dataclass
