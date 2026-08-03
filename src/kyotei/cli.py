@@ -755,6 +755,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windowsのコンソール（cp932等）では◎/○/✕のような記号文字がエンコードできず
+    # UnicodeEncodeErrorでクラッシュすることがある（タスクスケジューラ経由の非対話実行時に
+    # 顕在化しやすい）。コンソールの文字コードに関わらず出力できるよう、標準出力・標準エラーを
+    # UTF-8に強制する（表示できない文字は環境依存のフォールバック表示に留め、クラッシュさせない）。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

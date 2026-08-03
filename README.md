@@ -66,6 +66,11 @@ kyotei favorite today --date 20260802
 なのでClaude Code側の追加課金は無い）。全24場×12R想定で実行に80〜90分程度かかる。
 実行ログは `data/logs/` に保存される（.gitignore対象）。
 
+`kyotei today` で確定したレースは `data/kyotei.db` の答え合わせ用テーブルにも自動で
+保存されるため、`kyotei stats`/`kyotei patterns`・Webの「検証ダッシュボード」に
+毎日の的中率・回収率がそのまま積み上がっていく（別途 `backtest`/`backtest-day` を
+回す必要はない）。
+
 `data/kyotei.db` はリポジトリにコミットする運用にしている。ローカルでbacktestを実行して
 データを蓄積したら、以下でpushするとスマホ（Streamlit Cloud）側の検証ダッシュボードにも
 反映される。

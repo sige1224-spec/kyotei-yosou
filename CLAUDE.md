@@ -197,6 +197,24 @@ python -m pytest                                            # テスト実行
   Claudeを一切呼び出さない）。実行ログは`data/logs/`にタイムスタンプ付きで保存
   （.gitignore対象）。PCがその時刻に起動している必要がある。タスクの削除は
   `Unregister-ScheduledTask -TaskName KyoteiDailyRoutine`。
+- `kyotei today`（`predictionlog.compare_logged_predictions`）は、確定したレースを
+  `data/kyotei.db`の`backtests`テーブルにも保存するようにした（2026-08-03追加）。
+  `predicted_ranking`/`win_probabilities`から最小限の`RaceCard`/`RacePrediction`を
+  組み立て直し、既存の`evaluate_prediction`/`BacktestStore.save`をそのまま再利用している。
+  これにより、毎日`predict-all`→`today`を回すだけで`kyotei stats`/`kyotei patterns`・
+  Webの「検証ダッシュボード」（日次の的中率・回収率の推移グラフ、直近の結果一覧）に
+  自動的に反映される。改めて`backtest`/`backtest-day`を回す必要はない（両方使った場合、
+  同じレースは後勝ちでUPSERTされる）。
+- 2026-08-03、2つの信頼性バグを修正:
+  1. `BoatraceClient.get_beforeinfo_html`/`get_odds3t_html`は、まだ情報が未公開
+     （発売前）で中身が空のページを取得した場合、キャッシュに書き込まない
+     （`_forget_cache`）ように修正。修正前は`predict-all`で前日に先取りした空ページが
+     永続キャッシュされ、当日実際に情報が公開された後も空のまま返り続けるバグがあった。
+  2. `kyotei`のCLI（`cli.py`の`main()`）は起動時に標準出力・標準エラーをUTF-8に
+     強制するようにした。Windowsのコンソール既定エンコーディング（cp932）は「✕」等の
+     一部記号を表現できず、`UnicodeEncodeError`でクラッシュしていた（`kyotei today`が
+     不的中レースを表示する際に発生。タスクスケジューラ経由の非対話実行で特に顕在化
+     しやすく、毎日の自動レビューが失敗し続ける原因になっていた）。
 
 ## 現状・今後
 - 出走表・直前情報・結果（払戻金含む）・3連単オッズ・選手の直近成績（過去3節）の取得/パース、

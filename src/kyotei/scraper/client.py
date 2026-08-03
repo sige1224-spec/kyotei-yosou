@@ -79,19 +79,35 @@ class BoatraceClient:
 
     def get_beforeinfo_html(self, venue_code: str, date: str, race_number: int) -> str:
         cache_key = f"beforeinfo_{venue_code}_{date}_{race_number}"
-        return self.get_html(
+        html = self.get_html(
             "/owpc/pc/race/beforeinfo",
             {"rno": str(race_number), "jcd": venue_code, "hd": date},
             cache_key,
         )
+        # 展示タイム・気象情報ともまだ未公開（発売の数時間前など）だと、ページ自体は
+        # 200 OKで返るが中身が空のことがある。そのまま永続キャッシュしてしまうと、
+        # 後で本当に公開された後も空のスナップショットを返し続けてしまうため、
+        # 空だった場合はキャッシュに残さず次回また取得し直す。
+        if self.use_cache and "weather1_bodyUnit" not in html and "is-fs12" not in html:
+            self._forget_cache(cache_key)
+        return html
 
     def get_odds3t_html(self, venue_code: str, date: str, race_number: int) -> str:
         cache_key = f"odds3t_{venue_code}_{date}_{race_number}"
-        return self.get_html(
+        html = self.get_html(
             "/owpc/pc/race/odds3t",
             {"rno": str(race_number), "jcd": venue_code, "hd": date},
             cache_key,
         )
+        # オッズも発売前は空ページになりうる。beforeinfoと同様、空なら永続キャッシュしない。
+        if self.use_cache and "oddsPoint" not in html:
+            self._forget_cache(cache_key)
+        return html
+
+    def _forget_cache(self, cache_key: str) -> None:
+        cache_file = self.cache_dir / f"{cache_key}.html"
+        if cache_file.exists():
+            cache_file.unlink()
 
     def get_racer_back3_html(self, racer_id: int) -> str:
         cache_key = f"back3_{racer_id}"
