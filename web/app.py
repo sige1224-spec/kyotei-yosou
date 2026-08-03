@@ -34,6 +34,7 @@ from kyotei.models.genres import (
     MID_ODDS_MIN,
     categorize_trifecta,
 )
+from kyotei.favoritesview import today_favorite_races
 from kyotei.models.predictor import predict_race
 from kyotei.models.scan import scan_races
 from kyotei.predictionlog import compare_logged_predictions
@@ -814,6 +815,138 @@ def _render_patterns_page() -> None:
         },
     )
 
+    by_weather = store.stats_by_weather()
+    by_wind = [r for r in store.stats_by_wind_speed() if r["count"] > 0]
+    by_wave = [r for r in store.stats_by_wave_height() if r["count"] > 0]
+    st.subheader("天候ごとの的中率・回収率")
+    st.caption(
+        "予想スコアには天候を反映していない。荒天時に的中率が下がる傾向があるかを見るための参考情報。"
+        "天候データは2026-08-03以降にbacktestを実行したレースから記録される"
+        "（既存レースもbacktestを再実行すれば遡って記録できる）。"
+    )
+    if not (by_weather or by_wind or by_wave):
+        st.info("天候データがまだ記録されていません。")
+    else:
+        if by_weather:
+            weather_df = pd.DataFrame(by_weather)
+            weather_df["top1_rate_pct"] = weather_df["top1_rate"] * 100
+            weather_bar = (
+                alt.Chart(weather_df)
+                .mark_bar(size=30, cornerRadiusTopLeft=4, cornerRadiusTopRight=4, color=CATEGORICAL_PALETTE[2])
+                .encode(
+                    x=alt.X("weather:N", sort=None, title="天候"),
+                    y=alt.Y("top1_rate_pct:Q", title="単勝的中率(%)"),
+                    tooltip=[
+                        alt.Tooltip("weather:N", title="天候"),
+                        alt.Tooltip("count:Q", title="件数"),
+                        alt.Tooltip("top1_rate_pct:Q", title="単勝的中率", format=".1f"),
+                    ],
+                )
+            )
+            st.altair_chart(weather_bar.properties(height=260), width="stretch")
+            st.dataframe(
+                weather_df[["weather", "count", "top1_rate", "tansho_roi"]],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "weather": "天候",
+                    "count": "件数",
+                    "top1_rate": st.column_config.NumberColumn("単勝的中率", format="%.1f%%"),
+                    "tansho_roi": st.column_config.NumberColumn("単勝回収率", format="%.1f%%"),
+                },
+            )
+        wind_wave_cols = st.columns(2)
+        if by_wind:
+            with wind_wave_cols[0]:
+                st.markdown("###### 風速帯")
+                st.dataframe(
+                    pd.DataFrame(by_wind)[["bucket", "count", "top1_rate", "tansho_roi"]],
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "bucket": "風速",
+                        "count": "件数",
+                        "top1_rate": st.column_config.NumberColumn("実際の的中率", format="%.1f%%"),
+                        "tansho_roi": st.column_config.NumberColumn("単勝回収率", format="%.1f%%"),
+                    },
+                )
+        if by_wave:
+            with wind_wave_cols[1]:
+                st.markdown("###### 波高帯")
+                st.dataframe(
+                    pd.DataFrame(by_wave)[["bucket", "count", "top1_rate", "tansho_roi"]],
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "bucket": "波高",
+                        "count": "件数",
+                        "top1_rate": st.column_config.NumberColumn("実際の的中率", format="%.1f%%"),
+                        "tansho_roi": st.column_config.NumberColumn("単勝回収率", format="%.1f%%"),
+                    },
+                )
+
+
+def _render_favorites_today_page() -> None:
+    st.title("今日のお気に入り")
+    st.caption(
+        "お気に入り登録した競艇場で開催中のレースと、その中にお気に入り選手が出走しているかを"
+        "まとめて確認できるホーム画面。全24場を毎回横断すると公式サイトへの負荷が大きいため、"
+        "対象はお気に入り競艇場のみ（選手の登録はお気に入り管理ページ、または「レース予想」"
+        "ページの選手情報下から行う）。"
+    )
+
+    target_date = st.sidebar.date_input("対象日", value=date.today(), key="fav_today_date")
+    races_text = st.sidebar.text_input("対象レース", value="1-12", key="fav_today_races")
+    use_cache = st.sidebar.checkbox("ローカルキャッシュを使う", value=True, key="fav_today_use_cache")
+    run = st.sidebar.button("確認する", type="primary")
+
+    favorite_venues = FavoriteStore().list(kind=FAVORITE_VENUE)
+    if not favorite_venues:
+        st.info(
+            "お気に入り競艇場が未登録です。「レース予想」ページのサイドバー、または「お気に入り管理」"
+            "ページから登録してください。"
+        )
+        return
+
+    if not run:
+        st.info("左のサイドバーで対象日・レースを選び「確認する」を押してください。")
+        return
+
+    date_str = target_date.strftime("%Y%m%d")
+    races = parse_race_range(races_text)
+    client = BoatraceClient(use_cache=use_cache)
+
+    with st.spinner("お気に入り競艇場のレースを確認中..."):
+        matches = today_favorite_races(client, date_str, races)
+
+    if not matches:
+        st.info(f"{date_str} は登録済みのお気に入り競艇場での開催が見つかりませんでした。")
+        return
+
+    rows = []
+    for m in matches:
+        top = m.prediction.as_rank_list()[0]
+        rows.append(
+            {
+                "場": m.venue_name,
+                "R": m.race_number,
+                "予想1位": f"{top.lane}号艇 {top.racer_name}",
+                "推定勝率": top.win_probability * 100,
+                "お気に入り選手": "・".join(f"{lane}号艇" for lane in m.favorite_racer_lanes) or "-",
+            }
+        )
+    result_df = pd.DataFrame(rows)
+    st.dataframe(
+        result_df,
+        width="stretch",
+        hide_index=True,
+        column_config={"推定勝率": st.column_config.NumberColumn("推定勝率", format="%.1f%%")},
+    )
+
+    favorite_matches = [m for m in matches if m.favorite_racer_lanes]
+    if favorite_matches:
+        st.success(f"お気に入り選手が出走するレースが{len(favorite_matches)}件あります。")
+
 
 def _render_favorites_page() -> None:
     st.title("お気に入り管理")
@@ -900,10 +1033,20 @@ def _render_today_page() -> None:
 def main() -> None:
     page = st.sidebar.radio(
         "ページ",
-        ["レース予想", "狙い目スキャン", "勝ちパターン分析", "お気に入り管理", "今日の予想ログ", "検証ダッシュボード"],
+        [
+            "今日のお気に入り",
+            "レース予想",
+            "狙い目スキャン",
+            "勝ちパターン分析",
+            "お気に入り管理",
+            "今日の予想ログ",
+            "検証ダッシュボード",
+        ],
     )
     st.sidebar.divider()
-    if page == "レース予想":
+    if page == "今日のお気に入り":
+        _render_favorites_today_page()
+    elif page == "レース予想":
         _render_predict_page()
     elif page == "狙い目スキャン":
         _render_scan_page()

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from kyotei.scraper.beforeinfo import parse_beforeinfo_html
 from kyotei.scraper.racelist import parse_racelist_html
 from kyotei.scraper.result import parse_raceresult_html
 from kyotei.models.predictor import predict_race
@@ -15,9 +16,10 @@ from kyotei.storage import (
 
 RACELIST_FIXTURE = Path(__file__).parent / "fixtures" / "racelist_01_20260802_1.html"
 RESULT_FIXTURE = Path(__file__).parent / "fixtures" / "raceresult_01_20260731_1.html"
+BEFOREINFO_FIXTURE = Path(__file__).parent / "fixtures" / "beforeinfo_01_20260802_1.html"
 
 
-def _make_outcome():
+def _make_outcome(with_weather: bool = False):
     race = parse_racelist_html(
         RACELIST_FIXTURE.read_text(encoding="utf-8"), "01", "20260802", 1
     )
@@ -25,7 +27,13 @@ def _make_outcome():
         RESULT_FIXTURE.read_text(encoding="utf-8"), "01", "20260802", 1
     )
     prediction = predict_race(race)
-    return evaluate_prediction(prediction, result)
+    weather = None
+    if with_weather:
+        before_info = parse_beforeinfo_html(
+            BEFOREINFO_FIXTURE.read_text(encoding="utf-8"), "01", "20260802", 1
+        )
+        weather = before_info.weather
+    return evaluate_prediction(prediction, result, weather=weather)
 
 
 def test_evaluate_prediction_matches_known_winner():
@@ -147,3 +155,57 @@ def test_prediction_log_store_upserts_latest_prediction(tmp_path):
     store.log(prediction)
     assert len(store.for_date("20260802")) == 1
     assert store.for_date("20260801") == []
+
+
+def test_evaluate_prediction_records_weather_when_provided():
+    outcome = _make_outcome(with_weather=True)
+    assert outcome.weather == "晴"
+    assert outcome.temperature == 30.0
+    assert outcome.wind_speed == 5.0
+    assert outcome.water_temperature == 24.0
+    assert outcome.wave_height == 4.0
+
+
+def test_evaluate_prediction_weather_none_when_not_provided():
+    outcome = _make_outcome(with_weather=False)
+    assert outcome.weather is None
+    assert outcome.temperature is None
+
+
+def test_store_save_persists_weather(tmp_path):
+    outcome = _make_outcome(with_weather=True)
+    store = BacktestStore(db_path=tmp_path / "test.db")
+    store.save(outcome)
+
+    recent = store.recent()
+    assert recent[0]["weather"] == "晴"
+    assert recent[0]["wind_speed"] == 5.0
+
+
+def test_stats_by_weather(tmp_path):
+    store = BacktestStore(db_path=tmp_path / "test.db")
+    store.save(_make_outcome(with_weather=True))
+
+    by_weather = store.stats_by_weather()
+    assert len(by_weather) == 1
+    assert by_weather[0]["weather"] == "晴"
+    assert by_weather[0]["count"] == 1
+
+
+def test_stats_by_weather_excludes_rows_without_weather(tmp_path):
+    store = BacktestStore(db_path=tmp_path / "test.db")
+    store.save(_make_outcome(with_weather=False))
+    assert store.stats_by_weather() == []
+
+
+def test_stats_by_wind_speed_and_wave_height_buckets(tmp_path):
+    store = BacktestStore(db_path=tmp_path / "test.db")
+    store.save(_make_outcome(with_weather=True))  # wind_speed=5.0, wave_height=4.0
+
+    by_wind = store.stats_by_wind_speed()
+    matching = [b for b in by_wind if b["bucket"] == "3〜6m"]
+    assert matching and matching[0]["count"] == 1
+
+    by_wave = store.stats_by_wave_height()
+    matching_wave = [b for b in by_wave if b["bucket"] == "3cm以上"]
+    assert matching_wave and matching_wave[0]["count"] == 1

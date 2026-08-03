@@ -39,7 +39,8 @@ def run_single_backtest(
             before_info = None
 
     prediction = predict_race(race, before_info=before_info, weights=weights)
-    outcome = evaluate_prediction(prediction, result)
+    weather = before_info.weather if before_info is not None else None
+    outcome = evaluate_prediction(prediction, result, weather=weather)
     store.save(outcome)
     return outcome
 

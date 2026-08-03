@@ -14,6 +14,7 @@
     kyotei favorite add-racer 4300 --label 加藤綾
     kyotei favorite add-venue 桐生
     kyotei favorite list
+    kyotei favorite today --date 20260802
     kyotei today --date 20260802
     kyotei predict-all --date 20260803 --venues all --races 1-12
 
@@ -39,6 +40,7 @@ from kyotei.models.genres import (
     MID_ODDS_MIN,
     categorize_trifecta,
 )
+from kyotei.favoritesview import today_favorite_races
 from kyotei.models.predictor import predict_race
 from kyotei.models.scan import scan_races, top_candidates
 from kyotei.predictionlog import compare_logged_predictions
@@ -438,6 +440,36 @@ def cmd_patterns(args: argparse.Namespace) -> int:
             f"実際の的中率{r['top1_rate'] * 100:>5.1f}%  単勝回収率{r['tansho_roi'] * 100:>6.1f}%"
         )
     print("※ 推定勝率帯が上がるほど実際の的中率も上がっていれば、モデルの確率の付け方は妥当と判断できる目安。")
+
+    by_weather = store.stats_by_weather(date_from=args.date_from, date_to=args.date_to)
+    by_wind = [r for r in store.stats_by_wind_speed(date_from=args.date_from, date_to=args.date_to) if r["count"] > 0]
+    by_wave = [r for r in store.stats_by_wave_height(date_from=args.date_from, date_to=args.date_to) if r["count"] > 0]
+    if by_weather or by_wind or by_wave:
+        print()
+        print("[天候ごとの的中率・回収率]")
+        print("※ 予想スコアには天候を反映していない。荒天時に的中率が下がる傾向があるかの参考情報。")
+        for r in by_weather:
+            print(
+                f"天候={r['weather']:<4} 件数{r['count']:>4}件  "
+                f"単勝的中率{r['top1_rate'] * 100:>5.1f}%  単勝回収率{r['tansho_roi'] * 100:>6.1f}%"
+            )
+        for r in by_wind:
+            print(
+                f"風速 {r['bucket']:<6} 件数{r['count']:>4}件  "
+                f"実際の的中率{r['top1_rate'] * 100:>5.1f}%  単勝回収率{r['tansho_roi'] * 100:>6.1f}%"
+            )
+        for r in by_wave:
+            print(
+                f"波高 {r['bucket']:<6} 件数{r['count']:>4}件  "
+                f"実際の的中率{r['top1_rate'] * 100:>5.1f}%  単勝回収率{r['tansho_roi'] * 100:>6.1f}%"
+            )
+    else:
+        print()
+        print(
+            "（天候データがまだ記録されていません。2026-08-03以降にbacktestを実行したレース分から"
+            "記録されます。既存のキャッシュ済みレースも `kyotei backtest`/`kyotei backtest-day` を"
+            "再実行すれば遡って記録できます）"
+        )
     return 0
 
 
@@ -483,6 +515,29 @@ def cmd_favorite_list(_args: argparse.Namespace) -> int:
         print("（登録なし）")
     for f in venues:
         print(f"  {f['label']}")
+    return 0
+
+
+def cmd_favorite_today(args: argparse.Namespace) -> int:
+    client = BoatraceClient(use_cache=not args.no_cache)
+    races = parse_race_range(args.races)
+    matches = today_favorite_races(client, args.date, races)
+    if not matches:
+        print(
+            "お気に入り競艇場での開催が見つかりませんでした"
+            "（お気に入り競艇場が未登録か、その日は開催がない可能性があります）。"
+        )
+        return 0
+    for m in matches:
+        top = m.prediction.as_rank_list()[0]
+        star_text = ""
+        if m.favorite_racer_lanes:
+            lanes_text = "・".join(f"{lane}号艇" for lane in m.favorite_racer_lanes)
+            star_text = f"  ★お気に入り選手: {lanes_text}"
+        print(
+            f"{m.venue_name} {m.race_number}R: "
+            f"予想1位={top.lane}号艇 {top.racer_name}（{top.win_probability * 100:.1f}%）{star_text}"
+        )
     return 0
 
 
@@ -664,6 +719,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     fav_list = favorite_subparsers.add_parser("list", help="お気に入り一覧を表示する")
     fav_list.set_defaults(func=cmd_favorite_list)
+
+    fav_today = favorite_subparsers.add_parser(
+        "today", help="お気に入り競艇場の今日の開催・お気に入り選手の出走有無をまとめて表示する"
+    )
+    fav_today.add_argument("--date", required=True, help="対象日 YYYYMMDD")
+    fav_today.add_argument(
+        "--races", default="1-12", help="レース番号（例: 1-12 や 1,3,5）。デフォルト全レース"
+    )
+    fav_today.add_argument("--no-cache", action="store_true")
+    fav_today.set_defaults(func=cmd_favorite_today)
 
     today_parser = subparsers.add_parser(
         "today", help="`predict`で実際に見た予想を、確定結果と突き合わせて振り返る"

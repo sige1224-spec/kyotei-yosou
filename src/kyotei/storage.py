@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from kyotei.models.combos import trifecta_candidates
-from kyotei.models.entities import RacePrediction, RaceResult
+from kyotei.models.entities import RacePrediction, RaceResult, WeatherInfo
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "kyotei.db"
 
@@ -41,6 +41,12 @@ CREATE TABLE IF NOT EXISTS backtests (
     tansho_payout INTEGER NOT NULL DEFAULT 0,
     trifecta_top1_hit INTEGER NOT NULL DEFAULT 0,
     trifecta_top1_payout INTEGER NOT NULL DEFAULT 0,
+    weather TEXT,
+    temperature REAL,
+    wind_speed REAL,
+    wind_direction_code INTEGER,
+    water_temperature REAL,
+    wave_height REAL,
     UNIQUE(venue_code, date, race_number)
 );
 """
@@ -50,6 +56,14 @@ _MIGRATION_COLUMNS = [
     ("tansho_payout", "INTEGER NOT NULL DEFAULT 0"),
     ("trifecta_top1_hit", "INTEGER NOT NULL DEFAULT 0"),
     ("trifecta_top1_payout", "INTEGER NOT NULL DEFAULT 0"),
+    # 天候データ（2026-08-03追加）。過去に記録した行はNULLのまま
+    # （backtestを再実行すればキャッシュ済みレースでも遡って記録される）。
+    ("weather", "TEXT"),
+    ("temperature", "REAL"),
+    ("wind_speed", "REAL"),
+    ("wind_direction_code", "INTEGER"),
+    ("water_temperature", "REAL"),
+    ("wave_height", "REAL"),
 ]
 
 
@@ -79,10 +93,24 @@ class BacktestOutcome:
     tansho_payout: int = 0
     trifecta_top1_hit: bool = False
     trifecta_top1_payout: int = 0
+    # 天候（backtest実行時にbefore_infoの気象情報が取得できていれば記録。取得できなければNone）。
+    # スコアには反映していない予想ロジックとは独立の記録で、荒天と的中率の相関分析に使う。
+    weather: str | None = None
+    temperature: float | None = None
+    wind_speed: float | None = None
+    wind_direction_code: int | None = None
+    water_temperature: float | None = None
+    wave_height: float | None = None
 
 
-def evaluate_prediction(prediction: RacePrediction, result: RaceResult) -> BacktestOutcome:
-    """予想結果と実際のレース結果（着順・払戻金）を突き合わせる。"""
+def evaluate_prediction(
+    prediction: RacePrediction, result: RaceResult, weather: WeatherInfo | None = None
+) -> BacktestOutcome:
+    """予想結果と実際のレース結果（着順・払戻金）を突き合わせる。
+
+    weatherを渡すと、そのレース直前の気象情報もBacktestOutcomeに記録する
+    （予想ロジックには使わず、後から`stats_by_weather`等で相関分析するための記録用）。
+    """
     ranked = prediction.as_rank_list()
     predicted_ranking = [p.lane for p in ranked]
     win_probabilities = {p.lane: p.win_probability for p in ranked}
@@ -129,6 +157,12 @@ def evaluate_prediction(prediction: RacePrediction, result: RaceResult) -> Backt
         tansho_payout=tansho_payout,
         trifecta_top1_hit=trifecta_top1_hit,
         trifecta_top1_payout=trifecta_top1_payout,
+        weather=weather.weather if weather is not None else None,
+        temperature=weather.temperature if weather is not None else None,
+        wind_speed=weather.wind_speed if weather is not None else None,
+        wind_direction_code=weather.wind_direction_code if weather is not None else None,
+        water_temperature=weather.water_temperature if weather is not None else None,
+        wave_height=weather.wave_height if weather is not None else None,
     )
 
 
@@ -154,8 +188,10 @@ class BacktestStore:
                     venue_code, venue_name, date, race_number, evaluated_at,
                     predicted_ranking, win_probabilities, actual_ranking,
                     actual_winner_lane, top1_hit, top2_hit, top3_hit,
-                    tansho_payout, trifecta_top1_hit, trifecta_top1_payout
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    tansho_payout, trifecta_top1_hit, trifecta_top1_payout,
+                    weather, temperature, wind_speed, wind_direction_code,
+                    water_temperature, wave_height
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(venue_code, date, race_number) DO UPDATE SET
                     evaluated_at=excluded.evaluated_at,
                     predicted_ranking=excluded.predicted_ranking,
@@ -167,7 +203,13 @@ class BacktestStore:
                     top3_hit=excluded.top3_hit,
                     tansho_payout=excluded.tansho_payout,
                     trifecta_top1_hit=excluded.trifecta_top1_hit,
-                    trifecta_top1_payout=excluded.trifecta_top1_payout
+                    trifecta_top1_payout=excluded.trifecta_top1_payout,
+                    weather=excluded.weather,
+                    temperature=excluded.temperature,
+                    wind_speed=excluded.wind_speed,
+                    wind_direction_code=excluded.wind_direction_code,
+                    water_temperature=excluded.water_temperature,
+                    wave_height=excluded.wave_height
                 """,
                 (
                     outcome.venue_code,
@@ -185,6 +227,12 @@ class BacktestStore:
                     outcome.tansho_payout,
                     int(outcome.trifecta_top1_hit),
                     outcome.trifecta_top1_payout,
+                    outcome.weather,
+                    outcome.temperature,
+                    outcome.wind_speed,
+                    outcome.wind_direction_code,
+                    outcome.water_temperature,
+                    outcome.wave_height,
                 ),
             )
             conn.commit()
@@ -382,6 +430,116 @@ class BacktestStore:
                 }
             )
         return result
+
+    def stats_by_weather(
+        self, date_from: str | None = None, date_to: str | None = None
+    ) -> list[dict]:
+        """天候（晴/曇/雨など）ごとの的中率・回収率。天候データが未記録の行は除外する。
+
+        天候はbacktest実行時にbefore_infoが取得できたレースのみ記録される
+        （2026-08-03以前に記録した行はNULLのまま。backtestを再実行すればキャッシュ済み
+        レースでも遡って記録される）。
+        """
+        query = (
+            "SELECT weather, SUM(top1_hit) AS top1, SUM(top2_hit) AS top2, SUM(top3_hit) AS top3, "
+            "SUM(tansho_payout) AS tansho_total, SUM(trifecta_top1_payout) AS trifecta_total, "
+            "COUNT(*) AS count "
+            "FROM backtests WHERE weather IS NOT NULL AND weather != ''"
+        )
+        params: list[str] = []
+        if date_from:
+            query += " AND date >= ?"
+            params.append(date_from)
+        if date_to:
+            query += " AND date <= ?"
+            params.append(date_to)
+        query += " GROUP BY weather ORDER BY count DESC"
+
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        return [
+            {
+                "weather": r[0],
+                "count": r[6],
+                "top1_rate": r[1] / r[6],
+                "top2_rate": r[2] / r[6],
+                "top3_rate": r[3] / r[6],
+                "tansho_roi": r[4] / (r[6] * 100),
+                "trifecta_roi": r[5] / (r[6] * 100),
+            }
+            for r in rows
+        ]
+
+    def _stats_by_numeric_bucket(
+        self,
+        column: str,
+        buckets: list[tuple[float, float, str]],
+        date_from: str | None,
+        date_to: str | None,
+    ) -> list[dict]:
+        query = f"SELECT {column}, top1_hit, tansho_payout FROM backtests WHERE {column} IS NOT NULL"
+        params: list[str] = []
+        if date_from:
+            query += " AND date >= ?"
+            params.append(date_from)
+        if date_to:
+            query += " AND date <= ?"
+            params.append(date_to)
+
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        agg = {label: {"count": 0, "top1": 0, "payout": 0} for _, _, label in buckets}
+        for value, top1_hit, payout in rows:
+            for lo, hi, label in buckets:
+                if lo <= value < hi:
+                    agg[label]["count"] += 1
+                    agg[label]["top1"] += top1_hit
+                    agg[label]["payout"] += payout
+                    break
+
+        result = []
+        for _lo, _hi, label in buckets:
+            a = agg[label]
+            count = a["count"]
+            result.append(
+                {
+                    "bucket": label,
+                    "count": count,
+                    "top1_rate": (a["top1"] / count) if count else 0.0,
+                    "tansho_roi": (a["payout"] / (count * 100)) if count else 0.0,
+                }
+            )
+        return result
+
+    def stats_by_wind_speed(
+        self,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        buckets: list[tuple[float, float, str]] | None = None,
+    ) -> list[dict]:
+        """風速帯ごとの実際の的中率・回収率（風が強いと荒れやすいかの目安）。"""
+        buckets = buckets or [
+            (0.0, 3.0, "3m未満"),
+            (3.0, 6.0, "3〜6m"),
+            (6.0, 999.0, "6m以上"),
+        ]
+        return self._stats_by_numeric_bucket("wind_speed", buckets, date_from, date_to)
+
+    def stats_by_wave_height(
+        self,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        buckets: list[tuple[float, float, str]] | None = None,
+    ) -> list[dict]:
+        """波高帯ごとの実際の的中率・回収率。"""
+        buckets = buckets or [
+            (0.0, 1.0, "1cm未満"),
+            (1.0, 3.0, "1〜3cm"),
+            (3.0, 999.0, "3cm以上"),
+        ]
+        return self._stats_by_numeric_bucket("wave_height", buckets, date_from, date_to)
 
 
 _FAVORITES_SCHEMA = """

@@ -28,6 +28,7 @@ src/kyotei/
                         # OddsSnapshotStore/PredictionLogStore
   predictionlog.py     # PredictionLogStoreの記録を確定結果と突き合わせる（当日振り返り用）
   dayview.py            # 同一開催日・同一会場の他レース結果をまとめて取得
+  favoritesview.py      # お気に入り競艇場で開催中のレース＋お気に入り選手の出走有無をまとめる
   models/
     entities.py        # RaceCard, RacerEntry, BeforeInfo, RaceResult, Payout, TrifectaOdds,
                         # RationaleFactor 等
@@ -64,6 +65,7 @@ data/
 kyotei venues                                              # 場コード一覧
 kyotei predict --venue 桐生 --date 20260802 --race 1         # 予想・予想根拠・買い目候補・選手情報を表示
 kyotei predict-all --date 20260803 --venues all --races 1-12  # 指定日の全レースをまとめて予想し予想ログに記録
+kyotei favorite today --date 20260802                       # お気に入り競艇場の今日の開催・出走選手をまとめて表示
 kyotei backtest --venue 桐生 --date 20260731 --race 1         # 過去レース1件を答え合わせ
 kyotei backtest-day --date 20260731 --venues all --races 1-12  # 指定日をまとめて答え合わせ
 kyotei scan --date 20260802 --venues all --races 1-12 --genre 大穴  # 複数場・複数レース横断で狙い目候補を探す
@@ -163,6 +165,20 @@ python -m pytest                                            # テスト実行
   （＝実際にオッズを取得する）たびに、本命上位3点の3連単オッズを記録する。バックグラウンドで
   定期取得する仕組みは無い（サーバー常駐の仕組みがないため）ので、記録間隔は「利用者が
   そのレースを見た頻度」に依存し不定期。2回以上記録があるレースだけ推移グラフ/一覧を表示する。
+- 「今日のお気に入り」（`favoritesview.py`、2026-08-03追加）は、お気に入り競艇場で開催中の
+  レースを一覧し、その中にお気に入り選手が出走していれば合わせて示すホーム画面。全24場を
+  毎回横断すると負荷が大きくなるため、対象は明示的にお気に入り登録した競艇場のみに限定して
+  いる（お気に入り選手個別の全場横断検索はスコープ外。選手プロフィールページで確認する想定）。
+  Webの他ページ同様、ボタンを押すまでは取得を行わない（開くたびに自動でリクエストが飛ばない
+  ようにするため）。CLIは`kyotei favorite today --date`。
+- 天候データの記録・相関分析（2026-08-03追加）は、`backtest`実行時に取得できたbefore_infoの
+  気象情報（天候・気温・風速・水温・波高）を`backtests`テーブルにも記録し（列はnullable、
+  過去の記録行はNULLのまま）、`BacktestStore.stats_by_weather`/`stats_by_wind_speed`/
+  `stats_by_wave_height`で天候・風速帯・波高帯ごとの的中率・回収率を集計できるようにした
+  （`kyotei patterns`・Webの「勝ちパターン分析」ページに表示）。あくまで記録・分析のみで、
+  `predictor.py`のスコアには引き続き反映していない（天候の影響は状況依存で不確実性が高い
+  という既存方針は変更なし。十分なデータが溜まったら反映要否を検討する）。既存キャッシュ済み
+  レースもbacktestを再実行すれば遡って天候を記録できる。
 - 予想ログ・当日振り返り（`PredictionLogStore`/`predictionlog.py`、2026-08-03追加）は、
   `kyotei predict`・Webの予想画面で実際に見た予想を`prediction_log`テーブルに記録し
   （同一レースは最新の予想で上書き）、`kyotei today --date`・Webの「今日の予想ログ」
@@ -186,19 +202,26 @@ python -m pytest                                            # テスト実行
 - 出走表・直前情報・結果（払戻金含む）・3連単オッズ・選手の直近成績（過去3節）の取得/パース、
   統計・ルールベース予想＋予想根拠の文章化、買い目候補算出（本命/中穴/大穴ジャンル分け）、
   予算配分、同日他レース結果表示、複数場・複数レース横断の狙い目スキャン（`scan.py`、
-  お気に入り競艇場での絞り込み対応）、勝ちパターン分析（場ごと/自信度ごとの的中率）、
-  お気に入り選手・競艇場管理、オッズ推移記録、当日予想ログの振り返り、選手プロフィール
-  リンク、CLI（predict/backtest/backtest-day/scan/stats/patterns/favorite/today）、
-  Streamlitダッシュボード（レース予想・狙い目スキャン・勝ちパターン分析・お気に入り管理・
-  今日の予想ログ・検証ダッシュボードの6画面）まで実装済み。全24場での動作確認済み。
-  GitHub連携でStreamlit Community Cloudにデプロイし、iPhone等からアクセス可能な状態。
-  backtestデータ・お気に入り・オッズ推移・予想ログはいずれも同じ`data/kyotei.db`に
-  同居しgit管理下に置いているため、ローカルで蓄積したデータをpushすればスマホ側にも
-  反映される。
+  お気に入り競艇場での絞り込み対応）、勝ちパターン分析（場ごと/自信度ごとの的中率、
+  2026-08-03から天候・風速・波高ごとの的中率も追加）、お気に入り選手・競艇場管理、
+  「今日のお気に入り」ホーム画面、オッズ推移記録、当日予想ログの振り返り、複数日ぶんの
+  全レース一括予想（`predict-all`）、選手プロフィールリンク、CLI（predict/predict-all/
+  backtest/backtest-day/scan/stats/patterns/favorite/today）、Streamlitダッシュボード
+  （今日のお気に入り・レース予想・狙い目スキャン・勝ちパターン分析・お気に入り管理・
+  今日の予想ログ・検証ダッシュボードの7画面。「レース予想」は競艇場・レース番号を複数選択
+  して一括表示可能）まで実装済み。全24場での動作確認済み。GitHub連携でStreamlit Community
+  Cloudにデプロイし、iPhone等からアクセス可能な状態。backtestデータ・お気に入り・
+  オッズ推移・予想ログはいずれも同じ`data/kyotei.db`に同居しgit管理下に置いているため、
+  ローカルで蓄積したデータをpushすればスマホ側にも反映される。
 - `scripts/collect_history.py`（過去日をまとめてbacktest・データ蓄積）と
   `scripts/tune_weights.py`（キャッシュ済みHTMLのみでネットワーク不要の重み検証・
   ランダムサーチ。`--with-recent-form`で直近成績weightのablationも可能）も実装済み。
   一度データを蓄積すれば、以降の重み検証はネットアクセスなしで何度でも試せる。
+- Windowsタスクスケジューラのタスク`KyoteiDailyRoutine`（毎日20:30起動）で、
+  `scripts/daily_routine.ps1`から「前日分レビュー（`kyotei today`）→翌日分の全レース
+  予想（`kyotei predict-all`）」を自動実行する運用を2026-08-03に追加（詳細は上記
+  デプロイ節参照）。
 - 未着手: より多くの日数・場でのデータ蓄積による重みの再検証、`recent_form_weight`の
-  実データでの検証（現状0のまま）、天候の予想ロジックへの反映要否の検討、機械学習モデルへの
+  実データでの検証（現状0のまま）、天候データが十分溜まった後の予想ロジックへの反映要否の
+  検討（記録・分析基盤は2026-08-03に整備済み、スコアへの反映はまだ）、機械学習モデルへの
   置き換え。
