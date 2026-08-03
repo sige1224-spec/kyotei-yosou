@@ -120,30 +120,47 @@ def _render_predict_page() -> None:
     st.title("競艇予想（統計・ルールベース）")
     st.caption("※ 統計的な参考情報であり、的中・回収を保証するものではありません。舟券の購入判断はご自身で。")
 
-    venue_name = st.sidebar.selectbox("競艇場", list(VENUES.values()))
+    all_venue_names = list(VENUES.values())
+    venue_names = st.sidebar.multiselect(
+        "競艇場（複数選択可）", all_venue_names, default=[all_venue_names[0]]
+    )
     race_date = st.sidebar.date_input("開催日", value=date.today())
-    race_number = st.sidebar.selectbox("レース番号", list(range(1, 13)), format_func=lambda n: f"{n}R")
+    race_numbers = st.sidebar.multiselect(
+        "レース番号（複数選択可）", list(range(1, 13)), default=[1], format_func=lambda n: f"{n}R"
+    )
     use_cache = st.sidebar.checkbox("ローカルキャッシュを使う", value=True)
     show_recent_form = st.sidebar.checkbox(
         "直近成績（過去3節）も取得する", value=True, help="選手6人分で追加リクエストが発生し表示が少し遅くなる"
     )
-    favorite_venue_codes = {f["key"] for f in FavoriteStore().list(kind=FAVORITE_VENUE)}
-    is_favorite_venue = venue_code(venue_name) in favorite_venue_codes
-    fav_venue_toggle = st.sidebar.checkbox("この場をお気に入りに登録", value=is_favorite_venue)
-    if fav_venue_toggle != is_favorite_venue:
-        code_for_toggle = venue_code(venue_name)
-        if fav_venue_toggle:
-            FavoriteStore().add(FAVORITE_VENUE, code_for_toggle, venue_name)
-        else:
-            FavoriteStore().remove(FAVORITE_VENUE, code_for_toggle)
+    st.sidebar.caption("複数選択すると件数分まとめて表示します（多いほど時間がかかります）。")
     run = st.sidebar.button("予想する", type="primary")
 
     if not run:
-        st.info("左のサイドバーで競艇場・開催日・レース番号を選び「予想する」を押してください。")
+        st.info("左のサイドバーで競艇場・開催日・レース番号を選び（複数選択可）「予想する」を押してください。")
         return
 
-    code = venue_code(venue_name)
+    if not venue_names or not race_numbers:
+        st.warning("競艇場・レース番号をそれぞれ1つ以上選択してください。")
+        return
+
     date_str = race_date.strftime("%Y%m%d")
+    combos = [(v, r) for v in venue_names for r in race_numbers]
+
+    if len(combos) == 1:
+        venue_name, race_number = combos[0]
+        _render_prediction_body(venue_name, date_str, race_number, use_cache, show_recent_form)
+        return
+
+    st.caption(f"選択された{len(combos)}件のレースを表示します。")
+    for i, (venue_name, race_number) in enumerate(combos):
+        with st.expander(f"{venue_name} {date_str} {race_number}R", expanded=(i == 0)):
+            _render_prediction_body(venue_name, date_str, race_number, use_cache, show_recent_form)
+
+
+def _render_prediction_body(
+    venue_name: str, date_str: str, race_number: int, use_cache: bool, show_recent_form: bool
+) -> None:
+    code = venue_code(venue_name)
 
     try:
         with st.spinner("出走表・直前情報・オッズを取得中..."):
@@ -264,6 +281,19 @@ def _render_predict_page() -> None:
     st.dataframe(racer_df, width="stretch", hide_index=True, column_config=column_config)
 
     favorite_store = FavoriteStore()
+
+    is_favorite_venue = code in {f["key"] for f in favorite_store.list(kind=FAVORITE_VENUE)}
+    fav_venue_toggle = st.checkbox(
+        f"「{venue_name}」をお気に入りに登録",
+        value=is_favorite_venue,
+        key=f"fav_venue_{code}_{date_str}_{race_number}",
+    )
+    if fav_venue_toggle != is_favorite_venue:
+        if fav_venue_toggle:
+            favorite_store.add(FAVORITE_VENUE, code, venue_name)
+        else:
+            favorite_store.remove(FAVORITE_VENUE, code)
+
     favorite_racers = favorite_store.list(kind=FAVORITE_RACER)
     favorite_racer_ids = {int(f["key"]) for f in favorite_racers}
     racer_label_by_id = {e.racer_id: f"{e.lane}号艇 {e.name}" for e in prediction.race.entries}
@@ -395,8 +425,13 @@ def _render_predict_page() -> None:
     st.subheader("予算配分")
     st.caption("推定確率に比例して100円単位で配分する試算。実際の購入・投票は行わない。")
     budget_col, genre_col = st.columns([2, 1])
-    budget = budget_col.number_input("予算（円）", min_value=0, step=100, value=0)
-    budget_genre = genre_col.selectbox("配分対象ジャンル", [GENRE_HONMEI, GENRE_CHUANA, GENRE_OOANA])
+    race_key = f"{code}_{date_str}_{race_number}"
+    budget = budget_col.number_input(
+        "予算（円）", min_value=0, step=100, value=0, key=f"budget_{race_key}"
+    )
+    budget_genre = genre_col.selectbox(
+        "配分対象ジャンル", [GENRE_HONMEI, GENRE_CHUANA, GENRE_OOANA], key=f"budget_genre_{race_key}"
+    )
     if budget >= 100:
         target_candidates = genres.get(budget_genre, [])
         allocations = allocate_budget(target_candidates, int(budget))

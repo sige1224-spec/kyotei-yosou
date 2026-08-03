@@ -5,6 +5,7 @@ __pycache__/
 data/cache/*.html
 data/*.db
 !data/kyotei.db
+data/logs/
 .venv/
 .claude/
 Claude_Code_コマンド一覧.md

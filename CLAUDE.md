@@ -63,6 +63,7 @@ data/
 ```powershell
 kyotei venues                                              # 場コード一覧
 kyotei predict --venue 桐生 --date 20260802 --race 1         # 予想・予想根拠・買い目候補・選手情報を表示
+kyotei predict-all --date 20260803 --venues all --races 1-12  # 指定日の全レースをまとめて予想し予想ログに記録
 kyotei backtest --venue 桐生 --date 20260731 --race 1         # 過去レース1件を答え合わせ
 kyotei backtest-day --date 20260731 --venues all --races 1-12  # 指定日をまとめて答え合わせ
 kyotei scan --date 20260802 --venues all --races 1-12 --genre 大穴  # 複数場・複数レース横断で狙い目候補を探す
@@ -167,6 +168,19 @@ python -m pytest                                            # テスト実行
   （同一レースは最新の予想で上書き）、`kyotei today --date`・Webの「今日の予想ログ」
   ページで結果確定後に答え合わせする。`backtest`系（出走表データの時点で改めて予想し
   直す検証用）とは目的が異なり、「その時実際に何を見ていたか」をそのまま記録する点が違う。
+- `kyotei predict-all --date`（2026-08-03追加）は`scan_races`を使って指定日の複数場・
+  複数レースをまとめて予想し、`PredictionLogStore`に一括記録する（直前情報・オッズは
+  前日以前だとまだ未公開のことが多く、その場合は出走表データのみでの予想になる）。
+  `scripts/daily_routine.ps1` から `kyotei today --date <前日>` → `kyotei predict-all
+  --date <翌日>` の順に呼び出し、Windows タスクスケジューラのタスク
+  `KyoteiDailyRoutine`（毎日20:30起動、`Register-ScheduledTask`で登録済み）から
+  自動実行する運用にしている（ユーザーの生活パターン: 平日6:30起床7:00出発、
+  20:00頃帰宅、23:30就寝、に合わせて20:30に設定。2026-08-03時点）。全24場×12R想定で
+  実行に80〜90分程度かかる（`backtest-day`と同じ3リクエスト/レース構成のため）。
+  Claude Code側の課金は発生しない（ローカルのPythonスクリプトとして実行されるだけで、
+  Claudeを一切呼び出さない）。実行ログは`data/logs/`にタイムスタンプ付きで保存
+  （.gitignore対象）。PCがその時刻に起動している必要がある。タスクの削除は
+  `Unregister-ScheduledTask -TaskName KyoteiDailyRoutine`。
 
 ## 現状・今後
 - 出走表・直前情報・結果（払戻金含む）・3連単オッズ・選手の直近成績（過去3節）の取得/パース、

@@ -15,6 +15,7 @@
     kyotei favorite add-venue 桐生
     kyotei favorite list
     kyotei today --date 20260802
+    kyotei predict-all --date 20260803 --venues all --races 1-12
 
 全24競艇場で同じテンプレートのページを使用しているため、--venue には
 場名（例: 桐生）または2桁の場コード（例: 01）のどちらも指定できる。
@@ -39,7 +40,7 @@ from kyotei.models.genres import (
     categorize_trifecta,
 )
 from kyotei.models.predictor import predict_race
-from kyotei.models.scan import top_candidates
+from kyotei.models.scan import scan_races, top_candidates
 from kyotei.predictionlog import compare_logged_predictions
 from kyotei.scraper.beforeinfo import parse_beforeinfo_html
 from kyotei.scraper.client import BoatraceClient
@@ -519,6 +520,39 @@ def cmd_today(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_predict_all(args: argparse.Namespace) -> int:
+    """指定日の複数レースをまとめて予想し、予想ログに記録する（`kyotei today`で後日振り返れる）。
+
+    直前情報・オッズ・選手の直近成績は前日以前だとまだ公開されていないことが多く、
+    その場合は出走表データのみでの予想になる（`predict_race`はbefore_infoがNoneでも動作する）。
+    """
+    if args.venues.strip().lower() == "all":
+        codes = list(VENUES.keys())
+    else:
+        codes = [venue_code(v.strip()) for v in args.venues.split(",") if v.strip()]
+
+    races = parse_race_range(args.races)
+    client = BoatraceClient(use_cache=not args.no_cache)
+    log_store = PredictionLogStore()
+
+    print(f"[{args.date} 全レース予想] 対象{len(codes)}場×{len(races)}レース")
+    ran = skipped = 0
+    for code, race_number, prediction, _genres, error in scan_races(client, codes, args.date, races):
+        if error is not None or prediction is None:
+            skipped += 1
+            continue
+        log_store.log(prediction)
+        ran += 1
+        top = prediction.as_rank_list()[0]
+        print(
+            f"{VENUES.get(code, code)} {race_number}R: "
+            f"予想1位={top.lane}号艇 {top.racer_name}（{top.win_probability * 100:.1f}%）"
+        )
+
+    print(f"\n実行: {ran}件 / スキップ: {skipped}件（予想ログに記録。`kyotei today --date {args.date}` で後日振り返れます）")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="kyotei", description="競艇予想CLI（全24競艇場対応）")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -637,6 +671,20 @@ def build_parser() -> argparse.ArgumentParser:
     today_parser.add_argument("--date", required=True, help="対象日 YYYYMMDD")
     today_parser.add_argument("--no-cache", action="store_true")
     today_parser.set_defaults(func=cmd_today)
+
+    predict_all_parser = subparsers.add_parser(
+        "predict-all",
+        help="指定日の複数レースをまとめて予想し、予想ログに記録する（`kyotei today`で後日振り返り可能）",
+    )
+    predict_all_parser.add_argument("--date", required=True, help="対象日 YYYYMMDD")
+    predict_all_parser.add_argument(
+        "--venues", default="all", help="場名/場コードのカンマ区切り。デフォルト'all'（全24場）"
+    )
+    predict_all_parser.add_argument(
+        "--races", default="1-12", help="レース番号（例: 1-12 や 1,3,5）。デフォルト全レース"
+    )
+    predict_all_parser.add_argument("--no-cache", action="store_true")
+    predict_all_parser.set_defaults(func=cmd_predict_all)
 
     return parser
 
