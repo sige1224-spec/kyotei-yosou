@@ -1,3 +1,4 @@
+import dataclasses
 from pathlib import Path
 
 from kyotei.scraper.beforeinfo import parse_beforeinfo_html
@@ -97,6 +98,24 @@ def test_stats_by_venue_and_confidence_empty_when_no_data(tmp_path):
     assert store.stats_by_venue() == []
     by_confidence = store.stats_by_confidence()
     assert all(b["count"] == 0 for b in by_confidence)
+
+
+def test_monthly_stats_groups_by_year_month(tmp_path):
+    store = BacktestStore(db_path=tmp_path / "test.db")
+    outcome_aug = _make_outcome()
+    outcome_sep = dataclasses.replace(outcome_aug, date="20260901", race_number=2)
+    store.save(outcome_aug)
+    store.save(outcome_sep)
+
+    monthly = store.monthly_stats()
+    assert [m["month"] for m in monthly] == ["202608", "202609"]
+    assert monthly[0]["count"] == 1
+    assert monthly[1]["count"] == 1
+
+    monthly_venue = store.monthly_stats(venue_code="01")
+    assert len(monthly_venue) == 2
+    monthly_missing_venue = store.monthly_stats(venue_code="02")
+    assert monthly_missing_venue == []
 
 
 def test_favorite_store_add_remove_list(tmp_path):

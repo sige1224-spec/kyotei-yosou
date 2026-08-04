@@ -714,6 +714,45 @@ def _render_backtest_dashboard() -> None:
     else:
         st.info("まだbacktestデータがありません。上の「新しくbacktestを実行する」から実行してください。")
 
+    monthly = store.monthly_stats(venue_code=venue_filter_code)
+    if len(monthly) >= 2:
+        monthly_df = pd.DataFrame(monthly)
+        monthly_df["月"] = monthly_df["month"].str[:4] + "-" + monthly_df["month"].str[4:6]
+        monthly_df["top1_rate"] = monthly_df["top1_rate"] * 100
+        monthly_df["tansho_roi"] = monthly_df["tansho_roi"] * 100
+
+        st.markdown("##### 月ごとの的中率・回収率")
+        st.caption("日々の振れ幅を均した長期トレンド。件数が少ない月は参考程度に。")
+        monthly_cols = st.columns(2)
+
+        hit_bar = (
+            alt.Chart(monthly_df)
+            .mark_bar(size=30, cornerRadiusTopLeft=4, cornerRadiusTopRight=4, color=CATEGORICAL_PALETTE[0])
+            .encode(
+                x=alt.X("月:O", title="月"),
+                y=alt.Y("top1_rate:Q", title="単勝的中率(%)", scale=alt.Scale(domain=[0, 100])),
+                tooltip=["月", alt.Tooltip("top1_rate:Q", title="的中率(%)", format=".1f"), "count"],
+            )
+        )
+        monthly_cols[0].altair_chart(hit_bar.properties(height=260), width="stretch")
+
+        roi_monthly_max = max(120.0, float(monthly_df["tansho_roi"].max()) * 1.15)
+        monthly_breakeven = alt.Chart(pd.DataFrame({"y": [100]})).mark_rule(
+            strokeDash=[4, 4], color=INK_SECONDARY
+        ).encode(y="y:Q")
+        roi_bar = (
+            alt.Chart(monthly_df)
+            .mark_bar(size=30, cornerRadiusTopLeft=4, cornerRadiusTopRight=4, color=CATEGORICAL_PALETTE[3])
+            .encode(
+                x=alt.X("月:O", title="月"),
+                y=alt.Y("tansho_roi:Q", title="単勝回収率(%)", scale=alt.Scale(domain=[0, roi_monthly_max])),
+                tooltip=["月", alt.Tooltip("tansho_roi:Q", title="回収率(%)", format=".1f"), "count"],
+            )
+        )
+        monthly_cols[1].altair_chart(
+            (roi_bar + monthly_breakeven).properties(height=260), width="stretch"
+        )
+
     st.subheader("直近の結果一覧")
     recent = store.recent(limit=30)
     if recent:

@@ -429,6 +429,19 @@ def cmd_patterns(args: argparse.Namespace) -> int:
             f"3連単回収率{r['trifecta_roi'] * 100:>6.1f}%"
         )
 
+    monthly = store.monthly_stats(date_from=args.date_from, date_to=args.date_to)
+    if monthly:
+        print()
+        print("[月ごとの的中率・回収率]")
+        for r in monthly:
+            month_label = f"{r['month'][:4]}-{r['month'][4:6]}"
+            print(
+                f"{month_label} 件数{r['count']:>4}件  "
+                f"単勝的中率{r['top1_rate'] * 100:>5.1f}%  "
+                f"単勝回収率{r['tansho_roi'] * 100:>6.1f}%  "
+                f"3連単回収率{r['trifecta_roi'] * 100:>6.1f}%"
+            )
+
     print()
     print("[推定勝率帯ごとの実際の的中率（モデルの自信度は信頼できるか）]")
     by_confidence = store.stats_by_confidence(date_from=args.date_from, date_to=args.date_to)

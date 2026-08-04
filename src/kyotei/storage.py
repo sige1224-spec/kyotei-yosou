@@ -322,6 +322,53 @@ class BacktestStore:
             for r in rows
         ]
 
+    def monthly_stats(
+        self,
+        venue_code: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[dict]:
+        """月ごと（YYYYMM）の的中率・回収率推移（ダッシュボードのグラフ表示用）。
+
+        dateはYYYYMMDD形式の文字列で保存しているため、先頭6文字（YYYYMM）で
+        グルーピングする。daily_statsと違い月単位でまとめる分、日々の振れ幅が
+        均され、長期トレンドや季節性を見るのに向く。
+        """
+        query = (
+            "SELECT substr(date, 1, 6) AS month, "
+            "SUM(top1_hit) AS top1, SUM(top2_hit) AS top2, SUM(top3_hit) AS top3, "
+            "SUM(tansho_payout) AS tansho_total, SUM(trifecta_top1_payout) AS trifecta_total, "
+            "COUNT(*) AS count "
+            "FROM backtests WHERE 1=1"
+        )
+        params: list[str] = []
+        if venue_code:
+            query += " AND venue_code = ?"
+            params.append(venue_code)
+        if date_from:
+            query += " AND date >= ?"
+            params.append(date_from)
+        if date_to:
+            query += " AND date <= ?"
+            params.append(date_to)
+        query += " GROUP BY month ORDER BY month ASC"
+
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        return [
+            {
+                "month": r[0],
+                "top1_rate": r[1] / r[6],
+                "top2_rate": r[2] / r[6],
+                "top3_rate": r[3] / r[6],
+                "tansho_roi": r[4] / (r[6] * 100),
+                "trifecta_roi": r[5] / (r[6] * 100),
+                "count": r[6],
+            }
+            for r in rows
+        ]
+
     def recent(self, limit: int = 20) -> list[dict]:
         with closing(sqlite3.connect(self.db_path)) as conn:
             conn.row_factory = sqlite3.Row
