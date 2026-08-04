@@ -42,6 +42,7 @@ class RaceCard:
     date: str  # YYYYMMDD
     race_number: int
     entries: list[RacerEntry] = field(default_factory=list)
+    grade: str = ""  # 開催のグレード（"一般"/"G3"/"G2"/"G1"/"SG"）。取得できない場合は空文字
 
     def entry(self, lane: int) -> RacerEntry:
         for e in self.entries:

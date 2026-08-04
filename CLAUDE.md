@@ -222,18 +222,29 @@ python -m pytest                                            # テスト実行
   セクションとして追加し、Webの「検証ダッシュボード」にも日次推移グラフの下に月次バーチャート
   （的中率・回収率）を追加（該当月が2件以上ある場合のみ表示。1ヶ月分だけでは比較の意味が
   薄いため）。
-- 場・グレード（一般/G3/G2/G1/SG）ごとの分析は、場は既存の`stats_by_venue`で対応済み。
-  グレードは未着手（出走表ページのHTMLに`heading2_title is-G3b`のようなクラス名で
-  グレード情報自体は埋め込まれており取得は技術的に可能だが、`racelist.py`でのパース・
-  `RaceCard`への保持・`backtests`テーブルへの記録が必要。SG/G1/G2は開催数が少なく
-  当面サンプル数が少ないため、優先度は低めとして保留）。
+- 開催グレード（一般/G3/G2/G1/SG）の取得・記録を2026-08-04に実装。
+  `racelist.py`の`_parse_grade`が出走表ページの見出しdiv（`heading2_title`）の
+  クラス名（例: `is-G3b`。末尾`b`等は見出しレイアウトの接尾辞でグレードとは無関係）から
+  正規表現`is-(SG|G1|G2|G3|normal)`で判定し、`RaceCard.grade`に保持する（判定できなければ
+  空文字）。`evaluate_prediction`が`prediction.race.grade`をそのまま`BacktestOutcome.grade`
+  に引き継ぎ、`backtests`テーブルに記録（既存行はNULLのまま。天候と同様、backtestを
+  再実行すれば遡って記録できる）。`prediction_log`テーブルにも`grade`列を追加し、
+  `kyotei predict`/Web予想画面 → `PredictionLogStore.log`で記録 → `kyotei today`/
+  `compare_logged_predictions`で`backtests`へ引き継がれる経路も対応済み（`predict-all`→
+  `today`の日次自動フローでも遡らずグレードが記録される）。`BacktestStore.stats_by_grade()`
+  で集計し、`kyotei patterns`に`[グレードごとの的中率・回収率]`セクション、Webの
+  「勝ちパターン分析」ページに同内容のグラフ・表を追加。件数順ではなく格付け順
+  （一般→G3→G2→G1→SG）で表示。`kyotei predict`・Webの予想画面には非一般戦のみ
+  `[G3]`等のグレード表示を追加（ユーザーが重賞を特に重視しているため）。
+  SG/G1/G2は開催数自体が少ないため、当面はサンプル数が少ない点に注意（表示上も明記）。
 
 ## 現状・今後
 - 出走表・直前情報・結果（払戻金含む）・3連単オッズ・選手の直近成績（過去3節）の取得/パース、
   統計・ルールベース予想＋予想根拠の文章化、買い目候補算出（本命/中穴/大穴ジャンル分け）、
   予算配分、同日他レース結果表示、複数場・複数レース横断の狙い目スキャン（`scan.py`、
   お気に入り競艇場での絞り込み対応）、勝ちパターン分析（場ごと/自信度ごとの的中率、
-  2026-08-03から天候・風速・波高ごとの的中率も追加）、お気に入り選手・競艇場管理、
+  2026-08-03から天候・風速・波高ごと、2026-08-04から月ごと・グレードごとの的中率も追加）、
+  お気に入り選手・競艇場管理、
   「今日のお気に入り」ホーム画面、オッズ推移記録、当日予想ログの振り返り、複数日ぶんの
   全レース一括予想（`predict-all`）、選手プロフィールリンク、CLI（predict/predict-all/
   backtest/backtest-day/scan/stats/patterns/favorite/today）、Streamlitダッシュボード

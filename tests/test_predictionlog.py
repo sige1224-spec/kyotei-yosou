@@ -62,6 +62,7 @@ def test_compare_logged_predictions_persists_to_backtest_store(tmp_path):
     assert recent[0]["venue_code"] == "01"
     assert recent[0]["race_number"] == 1
     assert recent[0]["actual_winner_lane"] == 3
+    assert recent[0]["grade"] == "G3"  # racelist_01_20260802_1.htmlのフィクスチャはG3
 
 
 def test_compare_logged_predictions_unresolved_when_no_result(tmp_path):

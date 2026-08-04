@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from kyotei.scraper.racelist import parse_racelist_html
+from bs4 import BeautifulSoup
+
+from kyotei.scraper.racelist import _parse_grade, parse_racelist_html
 
 FIXTURE = Path(__file__).parent / "fixtures" / "racelist_01_20260802_1.html"
 
@@ -15,6 +17,23 @@ def test_parses_six_entries():
     assert card.venue_name == "桐生"
     assert len(card.entries) == 6
     assert [e.lane for e in card.entries] == [1, 2, 3, 4, 5, 6]
+
+
+def test_parses_grade():
+    card = _load_card()
+    assert card.grade == "G3"
+
+
+def test_parse_grade_variants():
+    cases = {
+        '<div class="heading2_title is-normal"></div>': "一般",
+        '<div class="heading2_title is-G1"></div>': "G1",
+        '<div class="heading2_title is-G2b"></div>': "G2",
+        '<div class="heading2_title is-SG"></div>': "SG",
+        '<div class="heading2"></div>': "",
+    }
+    for html, expected in cases.items():
+        assert _parse_grade(BeautifulSoup(html, "lxml")) == expected
 
 
 def test_lane1_racer_fields():

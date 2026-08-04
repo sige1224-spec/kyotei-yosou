@@ -100,6 +100,36 @@ def test_stats_by_venue_and_confidence_empty_when_no_data(tmp_path):
     assert all(b["count"] == 0 for b in by_confidence)
 
 
+def test_evaluate_prediction_records_grade():
+    outcome = _make_outcome()
+    assert outcome.grade == "G3"
+
+
+def test_store_save_persists_grade(tmp_path):
+    outcome = _make_outcome()
+    store = BacktestStore(db_path=tmp_path / "test.db")
+    store.save(outcome)
+
+    recent = store.recent()
+    assert recent[0]["grade"] == "G3"
+
+
+def test_stats_by_grade(tmp_path):
+    store = BacktestStore(db_path=tmp_path / "test.db")
+    outcome_g3 = _make_outcome()
+    outcome_general = dataclasses.replace(outcome_g3, date="20260803", race_number=2, grade="一般")
+    outcome_unknown = dataclasses.replace(outcome_g3, date="20260804", race_number=3, grade="")
+    store.save(outcome_g3)
+    store.save(outcome_general)
+    store.save(outcome_unknown)
+
+    by_grade = store.stats_by_grade()
+    # 未判定(空文字)の行は除外され、格付け順（一般→G3）で返る
+    assert [r["grade"] for r in by_grade] == ["一般", "G3"]
+    assert by_grade[0]["count"] == 1
+    assert by_grade[1]["count"] == 1
+
+
 def test_monthly_stats_groups_by_year_month(tmp_path):
     store = BacktestStore(db_path=tmp_path / "test.db")
     outcome_aug = _make_outcome()

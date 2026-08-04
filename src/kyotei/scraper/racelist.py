@@ -77,6 +77,26 @@ def _parse_equipment(cell: Tag) -> tuple[int, float, float]:
     return _safe_int(values[0]), _safe_float(values[1]), _safe_float(values[2])
 
 
+_GRADE_LABELS = {"SG": "SG", "G1": "G1", "G2": "G2", "G3": "G3", "normal": "一般"}
+
+
+def _parse_grade(soup: BeautifulSoup) -> str:
+    """開催のグレードを取得する。
+
+    見出しdiv（`heading2_title`）のクラス名に `is-G3b` のようにグレードが
+    埋め込まれている（末尾の`b`等は見出しのレイアウト差異を表す接尾辞で
+    グレードとは無関係）。判定できない場合は空文字を返す。
+    """
+    title_div = soup.find("div", class_="heading2_title")
+    if title_div is None:
+        return ""
+    for cls in title_div.get("class") or []:
+        match = re.match(r"is-(SG|G1|G2|G3|normal)", cls)
+        if match:
+            return _GRADE_LABELS[match.group(1)]
+    return ""
+
+
 def parse_racelist_html(
     html: str, venue_code: str, date: str, race_number: int
 ) -> RaceCard:
@@ -154,4 +174,5 @@ def parse_racelist_html(
         date=date,
         race_number=race_number,
         entries=entries,
+        grade=_parse_grade(soup),
     )

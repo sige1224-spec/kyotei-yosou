@@ -68,6 +68,7 @@ def compare_logged_predictions(
                 date=entry["date"],
                 race_number=entry["race_number"],
                 entries=[],
+                grade=entry.get("grade", ""),
             )
             lane_predictions = [
                 LanePrediction(

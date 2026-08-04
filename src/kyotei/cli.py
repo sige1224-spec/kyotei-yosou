@@ -80,8 +80,9 @@ def _format_prediction(
 ) -> str:
     race = prediction.race
     favorite_racer_ids = favorite_racer_ids or set()
+    grade_label = f"[{race.grade}] " if race.grade and race.grade != "一般" else ""
     lines = [
-        f"{race.venue_name}（{race.venue_code}） {race.date} {race.race_number}R 予想",
+        f"{grade_label}{race.venue_name}（{race.venue_code}） {race.date} {race.race_number}R 予想",
         "※ 統計的な参考情報であり、的中・回収を保証するものではありません。舟券の購入判断はご自身で。",
         "",
         "[推定勝率]",
@@ -427,6 +428,25 @@ def cmd_patterns(args: argparse.Namespace) -> int:
             f"単勝的中率{r['top1_rate'] * 100:>5.1f}%  "
             f"単勝回収率{r['tansho_roi'] * 100:>6.1f}%  "
             f"3連単回収率{r['trifecta_roi'] * 100:>6.1f}%"
+        )
+
+    by_grade = store.stats_by_grade(date_from=args.date_from, date_to=args.date_to)
+    if by_grade:
+        print()
+        print("[グレードごとの的中率・回収率]")
+        for r in by_grade:
+            print(
+                f"{r['grade']:<4} 件数{r['count']:>4}件  "
+                f"単勝的中率{r['top1_rate'] * 100:>5.1f}%  "
+                f"単勝回収率{r['tansho_roi'] * 100:>6.1f}%  "
+                f"3連単回収率{r['trifecta_roi'] * 100:>6.1f}%"
+            )
+    else:
+        print()
+        print(
+            "（グレードデータがまだ記録されていません。2026-08-04以降にbacktestを実行したレース分から"
+            "記録されます。既存のキャッシュ済みレースも `kyotei backtest`/`kyotei backtest-day` を"
+            "再実行すれば遡って記録できます）"
         )
 
     monthly = store.monthly_stats(date_from=args.date_from, date_to=args.date_to)

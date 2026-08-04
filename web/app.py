@@ -172,6 +172,10 @@ def _render_prediction_body(
         st.error(f"取得に失敗しました: {exc}")
         return
 
+    grade = prediction.race.grade
+    if grade and grade != "一般":
+        st.caption(f"開催グレード: {grade}")
+
     ranked = prediction.as_rank_list()
     df = pd.DataFrame(
         [
@@ -816,6 +820,48 @@ def _render_patterns_page() -> None:
             "trifecta_roi": st.column_config.NumberColumn("3連単回収率", format="%.1f%%"),
         },
     )
+
+    by_grade = store.stats_by_grade()
+    st.subheader("グレードごとの的中率・回収率")
+    st.caption(
+        "一般戦/G3/G2/G1/SGごとの的中率・回収率。グレードデータは2026-08-04以降に"
+        "backtestを実行したレースから記録される（既存レースもbacktestを再実行すれば"
+        "遡って記録できる）。SG/G1/G2は開催数自体が少ないため、件数が少ないうちは参考程度に。"
+    )
+    if not by_grade:
+        st.info("グレードデータがまだ記録されていません。")
+    else:
+        grade_df = pd.DataFrame(by_grade)
+        grade_df["top1_rate_pct"] = grade_df["top1_rate"] * 100
+        grade_order = ["一般", "G3", "G2", "G1", "SG"]
+        grade_bar = (
+            alt.Chart(grade_df)
+            .mark_bar(size=30, cornerRadiusTopLeft=4, cornerRadiusTopRight=4, color=CATEGORICAL_PALETTE[4])
+            .encode(
+                x=alt.X("grade:N", sort=grade_order, title="グレード"),
+                y=alt.Y("top1_rate_pct:Q", title="単勝的中率(%)"),
+                tooltip=[
+                    alt.Tooltip("grade:N", title="グレード"),
+                    alt.Tooltip("count:Q", title="件数"),
+                    alt.Tooltip("top1_rate_pct:Q", title="単勝的中率", format=".1f"),
+                ],
+            )
+        )
+        st.altair_chart(grade_bar.properties(height=260), width="stretch")
+        st.dataframe(
+            grade_df[["grade", "count", "top1_rate", "top2_rate", "top3_rate", "tansho_roi", "trifecta_roi"]],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "grade": "グレード",
+                "count": "件数",
+                "top1_rate": st.column_config.NumberColumn("単勝的中率", format="%.1f%%"),
+                "top2_rate": st.column_config.NumberColumn("上位2以内", format="%.1f%%"),
+                "top3_rate": st.column_config.NumberColumn("上位3以内", format="%.1f%%"),
+                "tansho_roi": st.column_config.NumberColumn("単勝回収率", format="%.1f%%"),
+                "trifecta_roi": st.column_config.NumberColumn("3連単回収率", format="%.1f%%"),
+            },
+        )
 
     st.subheader("推定勝率帯ごとの実際の的中率")
     st.caption(

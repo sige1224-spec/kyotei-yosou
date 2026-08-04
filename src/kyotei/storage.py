@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS backtests (
     wind_direction_code INTEGER,
     water_temperature REAL,
     wave_height REAL,
+    grade TEXT,
     UNIQUE(venue_code, date, race_number)
 );
 """
@@ -64,6 +65,9 @@ _MIGRATION_COLUMNS = [
     ("wind_direction_code", "INTEGER"),
     ("water_temperature", "REAL"),
     ("wave_height", "REAL"),
+    # 開催グレード（2026-08-04追加）。過去に記録した行はNULLのまま
+    # （backtestを再実行すればキャッシュ済みレースでも遡って記録される）。
+    ("grade", "TEXT"),
 ]
 
 
@@ -101,6 +105,8 @@ class BacktestOutcome:
     wind_direction_code: int | None = None
     water_temperature: float | None = None
     wave_height: float | None = None
+    # 開催グレード（"一般"/"G3"/"G2"/"G1"/"SG"）。出走表から取得できなければ空文字。
+    grade: str = ""
 
 
 def evaluate_prediction(
@@ -163,6 +169,7 @@ def evaluate_prediction(
         wind_direction_code=weather.wind_direction_code if weather is not None else None,
         water_temperature=weather.water_temperature if weather is not None else None,
         wave_height=weather.wave_height if weather is not None else None,
+        grade=prediction.race.grade,
     )
 
 
@@ -190,8 +197,8 @@ class BacktestStore:
                     actual_winner_lane, top1_hit, top2_hit, top3_hit,
                     tansho_payout, trifecta_top1_hit, trifecta_top1_payout,
                     weather, temperature, wind_speed, wind_direction_code,
-                    water_temperature, wave_height
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    water_temperature, wave_height, grade
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(venue_code, date, race_number) DO UPDATE SET
                     evaluated_at=excluded.evaluated_at,
                     predicted_ranking=excluded.predicted_ranking,
@@ -209,7 +216,8 @@ class BacktestStore:
                     wind_speed=excluded.wind_speed,
                     wind_direction_code=excluded.wind_direction_code,
                     water_temperature=excluded.water_temperature,
-                    wave_height=excluded.wave_height
+                    wave_height=excluded.wave_height,
+                    grade=excluded.grade
                 """,
                 (
                     outcome.venue_code,
@@ -233,6 +241,7 @@ class BacktestStore:
                     outcome.wind_direction_code,
                     outcome.water_temperature,
                     outcome.wave_height,
+                    outcome.grade,
                 ),
             )
             conn.commit()
@@ -518,6 +527,49 @@ class BacktestStore:
             for r in rows
         ]
 
+    def stats_by_grade(
+        self, date_from: str | None = None, date_to: str | None = None
+    ) -> list[dict]:
+        """開催グレード（一般/G3/G2/G1/SG）ごとの的中率・回収率。
+
+        グレードが未記録の行（2026-08-04より前に記録した行、または出走表から
+        グレード判定できなかった行）は除外する。件数の多い一般戦順ではなく、
+        グレードの格付け順（一般→G3→G2→G1→SG）で返す。
+        """
+        query = (
+            "SELECT grade, SUM(top1_hit) AS top1, SUM(top2_hit) AS top2, SUM(top3_hit) AS top3, "
+            "SUM(tansho_payout) AS tansho_total, SUM(trifecta_top1_payout) AS trifecta_total, "
+            "COUNT(*) AS count "
+            "FROM backtests WHERE grade IS NOT NULL AND grade != ''"
+        )
+        params: list[str] = []
+        if date_from:
+            query += " AND date >= ?"
+            params.append(date_from)
+        if date_to:
+            query += " AND date <= ?"
+            params.append(date_to)
+        query += " GROUP BY grade"
+
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        grade_order = {"一般": 0, "G3": 1, "G2": 2, "G1": 3, "SG": 4}
+        rows = sorted(rows, key=lambda r: grade_order.get(r[0], 99))
+
+        return [
+            {
+                "grade": r[0],
+                "count": r[6],
+                "top1_rate": r[1] / r[6],
+                "top2_rate": r[2] / r[6],
+                "top3_rate": r[3] / r[6],
+                "tansho_roi": r[4] / (r[6] * 100),
+                "trifecta_roi": r[5] / (r[6] * 100),
+            }
+            for r in rows
+        ]
+
     def _stats_by_numeric_bucket(
         self,
         column: str,
@@ -710,9 +762,15 @@ CREATE TABLE IF NOT EXISTS prediction_log (
     logged_at TEXT NOT NULL,
     predicted_ranking TEXT NOT NULL,
     win_probabilities TEXT NOT NULL,
+    grade TEXT NOT NULL DEFAULT '',
     UNIQUE(venue_code, date, race_number)
 );
 """
+
+# 既存DBに後から追加したカラム（2026-08-04、grade追加）。
+_PREDICTION_LOG_MIGRATION_COLUMNS = [
+    ("grade", "TEXT NOT NULL DEFAULT ''"),
+]
 
 
 class PredictionLogStore:
@@ -727,6 +785,10 @@ class PredictionLogStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.db_path)) as conn:
             conn.executescript(_PREDICTION_LOG_SCHEMA)
+            existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(prediction_log)")}
+            for column, coltype in _PREDICTION_LOG_MIGRATION_COLUMNS:
+                if column not in existing_columns:
+                    conn.execute(f"ALTER TABLE prediction_log ADD COLUMN {column} {coltype}")
             conn.commit()
 
     def log(self, prediction: RacePrediction) -> None:
@@ -739,12 +801,13 @@ class PredictionLogStore:
                 """
                 INSERT INTO prediction_log (
                     venue_code, venue_name, date, race_number, logged_at,
-                    predicted_ranking, win_probabilities
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    predicted_ranking, win_probabilities, grade
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(venue_code, date, race_number) DO UPDATE SET
                     logged_at=excluded.logged_at,
                     predicted_ranking=excluded.predicted_ranking,
-                    win_probabilities=excluded.win_probabilities
+                    win_probabilities=excluded.win_probabilities,
+                    grade=excluded.grade
                 """,
                 (
                     race.venue_code,
@@ -754,6 +817,7 @@ class PredictionLogStore:
                     datetime.now(timezone.utc).isoformat(),
                     json.dumps(predicted_ranking),
                     json.dumps(win_probabilities),
+                    race.grade,
                 ),
             )
             conn.commit()
